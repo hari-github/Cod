@@ -1,0 +1,1296 @@
+# =============================================================================
+# NPS SURVEY COMMENT ANALYSIS PIPELINE
+# Health Insurance Member Experience | Tag → Theme → Narrative
+#
+# NOTEBOOK USAGE: Each section marked with ## ── CELL BREAK ── can be split
+# into a separate notebook cell. Run cells in order top to bottom.
+#
+# DEPENDENCIES: pip install openai pandas openpyxl tqdm
+# =============================================================================
+
+## ── CELL BREAK ── [1] IMPORTS & CONFIGURATION
+
+import os
+import json
+import time
+import re
+import pandas as pd
+from openai import OpenAI
+from tqdm import tqdm
+from pathlib import Path
+from datetime import datetime
+from collections import defaultdict
+
+# ── User Inputs ──────────────────────────────────────────────────────────────
+DATABRICKS_BASE_URL  = input("Enter Databricks base URL (e.g. https://<workspace>.azuredatabricks.net/serving-endpoints): ").strip()
+DATABRICKS_API_KEY   = input("Enter Databricks API key: ").strip()
+MODEL_ENDPOINT       = input("Enter model endpoint name (e.g. databricks-claude-sonnet-4): ").strip()
+COMMENTS_CSV_PATH    = input("Enter path to comments CSV file: ").strip()
+COMMENT_ID_COL       = input("Enter comment ID column name: ").strip()
+COMMENT_TEXT_COL     = input("Enter comment text column name: ").strip()
+MONTH_LABEL          = input("Enter month label for this run (e.g. 2025-04): ").strip()
+PRIOR_MONTH_LABEL    = input("Enter prior month label if available, else leave blank: ").strip()
+OUTPUT_DIR           = input("Enter output directory path: ").strip()
+
+# ── Client Setup ─────────────────────────────────────────────────────────────
+client = OpenAI(
+    api_key=DATABRICKS_API_KEY,
+    base_url=DATABRICKS_BASE_URL
+)
+
+# ── Paths ─────────────────────────────────────────────────────────────────────
+Path(OUTPUT_DIR).mkdir(parents=True, exist_ok=True)
+TAG_REPO_PATH          = os.path.join(OUTPUT_DIR, "tag_repository.json")
+THEME_TAG_MAP_PATH     = os.path.join(OUTPUT_DIR, f"theme_tag_mapping_{MONTH_LABEL}.json")
+TAGGED_COMMENTS_PATH   = os.path.join(OUTPUT_DIR, f"comments_tagged_{MONTH_LABEL}.json")
+ESSENCES_PATH          = os.path.join(OUTPUT_DIR, f"comment_essences_{MONTH_LABEL}.json")
+NARRATIVES_PATH        = os.path.join(OUTPUT_DIR, f"theme_narratives_{MONTH_LABEL}.json")
+EXCEL_OUTPUT_PATH      = os.path.join(OUTPUT_DIR, f"nps_analysis_{MONTH_LABEL}.xlsx")
+
+# ── Theme Definitions (predefined, fixed) ─────────────────────────────────────
+THEMES = {
+    "Cost & Financial Experience": (
+        "Members' perceptions of premiums, out-of-pocket costs, billing accuracy, "
+        "EOBs, and the overall financial burden of their health insurance."
+    ),
+    "Claims Experience": (
+        "End-to-end claims journey — submission, processing, status updates, "
+        "denials, appeals, and resolution timeliness."
+    ),
+    "Access to Care": (
+        "Ability to find in-network providers, get referrals, schedule appointments, "
+        "and access specialists or urgent care when needed."
+    ),
+    "Customer Service": (
+        "Interactions with the health plan's call center, chat, and member services — "
+        "responsiveness, resolution quality, and staff behavior."
+    ),
+    "Clinical & Care Quality": (
+        "Member perceptions of care quality, care coordination, chronic condition "
+        "management, and preventive care."
+    ),
+    "Digital Experience": (
+        "Mobile app, member portal, online tools — ease of use, functionality, "
+        "reliability, and self-service capability."
+    ),
+    "Pharmacy & Medications": (
+        "Prescription access, formulary coverage, mail order, specialty drugs, "
+        "and pharmacy network experience."
+    ),
+    "Prior Authorization & Referrals": (
+        "Experience with the prior auth process — speed, outcomes, member and provider "
+        "burden, and communication around decisions."
+    ),
+}
+
+print("✅ Configuration complete.")
+print(f"   Month       : {MONTH_LABEL}")
+print(f"   Prior Month : {PRIOR_MONTH_LABEL or 'None'}")
+print(f"   Output Dir  : {OUTPUT_DIR}")
+
+
+## ── CELL BREAK ── [2] HELPER FUNCTIONS
+
+def call_llm(system_prompt: str, user_prompt: str, label: str = "") -> str:
+    """
+    Single LLM call via OpenAI client pointed at Databricks serving endpoint.
+    Returns raw text response. Retries up to 3 times on failure.
+    """
+    for attempt in range(3):
+        try:
+            response = client.chat.completions.create(
+                model=MODEL_ENDPOINT,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user",   "content": user_prompt}
+                ],
+                temperature=0.0,   # Deterministic — critical for tagging consistency
+                max_tokens=4096
+            )
+            return response.choices[0].message.content.strip()
+        except Exception as e:
+            print(f"   ⚠️  LLM call failed (attempt {attempt+1}/3) [{label}]: {e}")
+            time.sleep(5 * (attempt + 1))
+    raise RuntimeError(f"LLM call failed after 3 attempts [{label}]")
+
+
+def parse_json_response(raw: str, label: str = "") -> any:
+    """
+    Safely parse JSON from LLM response.
+    Handles cases where model wraps output in markdown fences despite instructions.
+    """
+    # Strip markdown fences if present
+    cleaned = re.sub(r"```json\s*", "", raw)
+    cleaned = re.sub(r"```\s*", "", cleaned)
+    cleaned = cleaned.strip()
+    try:
+        return json.loads(cleaned)
+    except json.JSONDecodeError as e:
+        print(f"   ⚠️  JSON parse failed [{label}]: {e}")
+        print(f"   Raw response (first 300 chars): {raw[:300]}")
+        return None
+
+
+def chunk_list(lst: list, size: int) -> list:
+    """Split a list into chunks of given size."""
+    return [lst[i:i+size] for i in range(0, len(lst), size)]
+
+
+def save_json(obj: any, path: str):
+    with open(path, "w") as f:
+        json.dump(obj, f, indent=2)
+    print(f"   💾 Saved: {path}")
+
+
+def load_json(path: str) -> any:
+    with open(path) as f:
+        return json.load(f)
+
+
+print("✅ Helper functions defined.")
+
+
+## ── CELL BREAK ── [3] LOAD COMMENTS
+
+df_comments = pd.read_csv(COMMENTS_CSV_PATH)
+
+# Validate required columns
+assert COMMENT_ID_COL in df_comments.columns,   f"Column '{COMMENT_ID_COL}' not found in CSV"
+assert COMMENT_TEXT_COL in df_comments.columns, f"Column '{COMMENT_TEXT_COL}' not found in CSV"
+
+# Drop rows with empty comments
+df_comments = df_comments.dropna(subset=[COMMENT_TEXT_COL])
+df_comments[COMMENT_ID_COL] = df_comments[COMMENT_ID_COL].astype(str)
+df_comments[COMMENT_TEXT_COL] = df_comments[COMMENT_TEXT_COL].astype(str).str.strip()
+df_comments = df_comments[df_comments[COMMENT_TEXT_COL] != ""]
+
+comments = df_comments[[COMMENT_ID_COL, COMMENT_TEXT_COL]].to_dict(orient="records")
+
+print(f"✅ Loaded {len(comments)} comments from {COMMENTS_CSV_PATH}")
+print(df_comments[[COMMENT_ID_COL, COMMENT_TEXT_COL]].head(3))
+
+
+## ── CELL BREAK ── [4] STAGE 0A — TAG DISCOVERY (First run or forced refresh)
+# Run this cell only when tag_repository.json does not exist or needs full refresh.
+# For monthly runs, skip to cell [5] which loads the existing repository.
+
+FORCE_TAG_REDISCOVERY = False   # Set to True to rebuild tag repo from scratch
+
+if not os.path.exists(TAG_REPO_PATH) or FORCE_TAG_REDISCOVERY:
+    print("🔍 Stage 0A: Tag Discovery — processing all comments in batches of 100...")
+
+    # ── System Prompt ─────────────────────────────────────────────────────────
+    SYSTEM_0A = """You are an expert analyst specializing in health insurance member \
+experience and NPS (Net Promoter Score) research. Your role is to identify granular, \
+actionable tags that capture the specific topics, pain points, and positive experiences \
+members mention in their survey comments.
+
+Tags must be:
+- Granular and specific (e.g., "prior_auth_delay" not just "authorization")
+- Rooted in health insurance operations (clinical, administrative, financial, digital, service)
+- Distinct from each other — no overlapping definitions
+- Named in lowercase_underscore format (max 4 words)
+- Useful for a health plan operations team to take direct action
+
+Do NOT create generic tags like "positive_experience" or "negative_feedback". \
+Every tag must point to a specific operational area."""
+
+    raw_tag_pool = []
+    batches = chunk_list(comments, 100)
+
+    for batch_idx, batch in enumerate(tqdm(batches, desc="Tag Discovery Batches")):
+
+        # Format comments for prompt
+        comments_block = "\n".join(
+            f"[{i+1}] {c[COMMENT_TEXT_COL]}" for i, c in enumerate(batch)
+        )
+
+        # ── User Prompt ───────────────────────────────────────────────────────
+        USER_0A = f"""Below are {len(batch)} member comments from a health insurance NPS survey.
+
+Your task is to identify all granular tags that would be needed to categorize \
+the topics and experiences mentioned across these comments.
+
+<comments>
+{comments_block}
+</comments>
+
+Work through this carefully in two steps before producing output.
+
+STEP 1 — READ AND REASON:
+Read all comments. For each distinct topic, experience, or concern you observe, ask yourself:
+- Is this specific enough to be actionable? ("claim_denial" is better than "claims issue")
+- Is this distinct from other tags I have already identified?
+- Would a health plan operations team know exactly what area to investigate \
+  if they saw this tag?
+Write your reasoning here — list the topics you see and how you are deciding \
+to name and separate them.
+
+STEP 2 — OUTPUT:
+Return a JSON array of tag objects. Each object must have:
+- "tag": lowercase_underscore name (max 4 words)
+- "description": one precise sentence stating what this tag covers AND what \
+  it does NOT cover (draw the boundary clearly)
+- "example": a 5-10 word phrase from a comment that would trigger this tag
+
+Return only the JSON array. No preamble, no markdown fences."""
+
+        raw = call_llm(SYSTEM_0A, USER_0A, label=f"Discovery batch {batch_idx+1}")
+        parsed = parse_json_response(raw, label=f"Discovery batch {batch_idx+1}")
+        if parsed and isinstance(parsed, list):
+            raw_tag_pool.extend(parsed)
+
+        time.sleep(1)  # Rate limit buffer
+
+    print(f"   Raw tag pool size before consolidation: {len(raw_tag_pool)}")
+
+    # ── Stage 0B — Tag Consolidation ─────────────────────────────────────────
+    print("🔍 Stage 0B: Tag Consolidation — merging duplicates...")
+
+    SYSTEM_0B = """You are a taxonomy expert for health insurance member experience research. \
+You will be given a raw pool of tags generated from multiple batches of member comments. \
+Many tags will be duplicates, near-duplicates, or overlapping. \
+Your job is to produce a clean, precise, non-overlapping tag repository."""
+
+    USER_0B = f"""Below is a raw pool of tags collected from analyzing all member comments.
+Tags were generated in batches and contain duplicates, near-duplicates, and inconsistent naming.
+
+<raw_tags>
+{json.dumps(raw_tag_pool, indent=2)}
+</raw_tags>
+
+Work through this in four steps. Show your reasoning at each step.
+
+STEP 1 — GROUP:
+Group tags that refer to the same underlying concept. List each group with all \
+member tags. Explain why you grouped them.
+
+STEP 2 — RESOLVE OVERLAPS:
+For tags that partially overlap, decide:
+- Should they be merged into one broader tag?
+- Or kept separate with sharper boundaries?
+Explain your decision for each overlap case.
+
+STEP 3 — NAME AND DEFINE:
+For each final tag, write:
+- The most precise and descriptive name in lowercase_underscore format
+- A definition stating exactly what the tag covers
+- A NOT clause — what this tag explicitly excludes
+- An example phrase that would trigger this tag
+
+STEP 4 — OUTPUT:
+Return a JSON array of final tag objects:
+{{
+  "tag": "lowercase_underscore_name",
+  "description": "Covers X. Does NOT cover Y.",
+  "example": "short example phrase"
+}}
+
+Return only the JSON array. No preamble, no markdown fences."""
+
+    raw = call_llm(SYSTEM_0B, USER_0B, label="Tag Consolidation")
+    tag_repository = parse_json_response(raw, label="Tag Consolidation")
+
+    if tag_repository:
+        save_json(tag_repository, TAG_REPO_PATH)
+        print(f"✅ Tag repository built: {len(tag_repository)} tags")
+    else:
+        raise RuntimeError("Tag consolidation failed — check raw LLM output above")
+
+else:
+    print(f"⏭️  Tag repository already exists at {TAG_REPO_PATH}. Loading...")
+    tag_repository = load_json(TAG_REPO_PATH)
+    print(f"✅ Loaded {len(tag_repository)} tags from existing repository")
+
+
+## ── CELL BREAK ── [5] STAGE 1 — TAG EACH COMMENT (3 comments per API call)
+
+print(f"🏷️  Stage 1: Tagging {len(comments)} comments in batches of 3...")
+
+# ── System Prompt ─────────────────────────────────────────────────────────────
+SYSTEM_1 = """You are a health insurance member experience analyst. You will tag member \
+NPS survey comments using a predefined tag repository. Tags must be assigned based on \
+what the member explicitly states or clearly implies — do not infer beyond the comment.
+
+Tagging rules:
+- Assign the MINIMUM number of tags that fully cover the comment's content
+- Do not assign a tag unless the comment clearly relates to its definition
+- A comment may receive 1 to 5 tags. More than 5 is a signal you are over-tagging
+- If part of a comment does not fit any existing tag, propose a new tag
+- New tags must be granular, actionable, and health-insurance-specific — same \
+  quality bar as the existing repository
+
+Return only valid JSON. No preamble, no markdown fences."""
+
+tag_repo_str = json.dumps(tag_repository, indent=2)
+tagged_comments = []   # Final output: list of {comment_id, assigned_tags, new_tags}
+new_tag_suggestions = []
+
+batches = chunk_list(comments, 3)
+
+for batch_idx, batch in enumerate(tqdm(batches, desc="Tagging Comments")):
+
+    # Format comments block
+    comments_block = "\n".join(
+        f'[{c[COMMENT_ID_COL]}] {c[COMMENT_TEXT_COL]}' for c in batch
+    )
+
+    # ── User Prompt ───────────────────────────────────────────────────────────
+    USER_1 = f"""TAG REPOSITORY:
+<tags>
+{tag_repo_str}
+</tags>
+
+Tag the following {len(batch)} member comments.
+
+<comments>
+{comments_block}
+</comments>
+
+For EACH comment, work through these steps:
+
+STEP 1 — READ THE COMMENT:
+Summarize in one sentence what the member is primarily expressing.
+
+STEP 2 — MATCH TO TAGS:
+Go through the comment's key topics one by one. For each topic, identify the \
+best matching tag from the repository and briefly explain why it fits. \
+If no tag fits a topic, note it.
+
+STEP 3 — CHECK FOR OVER-TAGGING:
+Review your selected tags. Would removing any tag lose meaningful information \
+about this comment? If a tag is marginal, drop it.
+
+STEP 4 — NEW TAGS:
+If any part of the comment is not covered by existing tags, propose a new tag \
+with name, description, and example. Only propose if genuinely needed.
+
+STEP 5 — OUTPUT:
+Return a JSON array with one object per comment:
+[
+  {{
+    "comment_id": "<id>",
+    "assigned_tags": ["tag1", "tag2"],
+    "new_tags": [
+      {{
+        "tag": "new_tag_name",
+        "description": "Covers X. Does NOT cover Y.",
+        "example": "short example phrase"
+      }}
+    ]
+  }}
+]
+
+Return only the JSON array. No preamble, no markdown fences."""
+
+    raw = call_llm(SYSTEM_1, USER_1, label=f"Tagging batch {batch_idx+1}")
+    parsed = parse_json_response(raw, label=f"Tagging batch {batch_idx+1}")
+
+    if parsed and isinstance(parsed, list):
+        for item in parsed:
+            tagged_comments.append(item)
+            if item.get("new_tags"):
+                new_tag_suggestions.extend(item["new_tags"])
+    else:
+        # On parse failure, record comment IDs with empty tags so no comment is lost
+        for c in batch:
+            tagged_comments.append({
+                "comment_id": c[COMMENT_ID_COL],
+                "assigned_tags": [],
+                "new_tags": []
+            })
+
+    time.sleep(0.5)
+
+save_json(tagged_comments, TAGGED_COMMENTS_PATH)
+print(f"✅ Tagged {len(tagged_comments)} comments")
+print(f"   New tag suggestions collected: {len(new_tag_suggestions)}")
+
+
+## ── CELL BREAK ── [6] STAGE 2 — CONSOLIDATE NEW TAGS & UPDATE REPOSITORY
+
+if new_tag_suggestions:
+    print(f"🔄 Stage 2: Consolidating {len(new_tag_suggestions)} new tag suggestions...")
+
+    SYSTEM_2 = """You are a taxonomy expert for health insurance member experience research. \
+You will review new tag suggestions generated during comment tagging and decide which to \
+add to the existing tag repository. Apply a high bar — only add tags that are genuinely \
+new, granular, and actionable. Merge near-duplicates into existing tags where possible."""
+
+    USER_2 = f"""EXISTING TAG REPOSITORY:
+<existing_tags>
+{json.dumps(tag_repository, indent=2)}
+</existing_tags>
+
+NEW TAG SUGGESTIONS (from this month's comment tagging):
+<new_suggestions>
+{json.dumps(new_tag_suggestions, indent=2)}
+</new_suggestions>
+
+Work through this in three steps:
+
+STEP 1 — EVALUATE EACH SUGGESTION:
+For each new tag suggestion, determine:
+- Does it already exist in the repository (exact or near-duplicate)? If yes, \
+  name the existing tag it maps to.
+- Is it genuinely new and distinct? If yes, does it meet the quality bar \
+  (granular, actionable, health-insurance-specific)?
+- Should it be added as-is, renamed for consistency, or discarded?
+
+STEP 2 — PRODUCE ADDITIONS:
+List only the net-new tags approved for addition. Write clean definitions \
+following the same format as the existing repository.
+
+STEP 3 — OUTPUT:
+Return a JSON object with two keys:
+{{
+  "approved_new_tags": [
+    {{
+      "tag": "lowercase_underscore_name",
+      "description": "Covers X. Does NOT cover Y.",
+      "example": "short example phrase"
+    }}
+  ],
+  "merged_into_existing": [
+    {{
+      "suggested_tag": "...",
+      "merged_into": "existing_tag_name"
+    }}
+  ]
+}}
+
+Return only the JSON object. No preamble, no markdown fences."""
+
+    raw = call_llm(SYSTEM_2, USER_2, label="New Tag Consolidation")
+    parsed = parse_json_response(raw, label="New Tag Consolidation")
+
+    if parsed and "approved_new_tags" in parsed:
+        approved = parsed["approved_new_tags"]
+        tag_repository.extend(approved)
+        save_json(tag_repository, TAG_REPO_PATH)
+        print(f"   ✅ Added {len(approved)} new tags to repository")
+        print(f"   Repository now contains {len(tag_repository)} tags")
+
+        # Apply merged tag mappings back to tagged comments
+        merge_map = {
+            m["suggested_tag"]: m["merged_into"]
+            for m in parsed.get("merged_into_existing", [])
+        }
+        if merge_map:
+            for tc in tagged_comments:
+                tc["assigned_tags"] = [
+                    merge_map.get(t, t) for t in tc["assigned_tags"]
+                ]
+            save_json(tagged_comments, TAGGED_COMMENTS_PATH)
+            print(f"   🔁 Applied {len(merge_map)} tag merges back to comments")
+    else:
+        print("   ⚠️  No new tags approved or parse failed — repository unchanged")
+else:
+    print("⏭️  No new tag suggestions — skipping Stage 2")
+
+
+## ── CELL BREAK ── [7] STAGE 3 — THEME → TAG MAPPING
+
+print("🗺️  Stage 3: Building Theme → Tag mapping...")
+
+# Load prior month mapping if available as reference example for the LLM
+prior_mapping_str = "No prior month mapping available."
+if PRIOR_MONTH_LABEL:
+    prior_map_path = os.path.join(OUTPUT_DIR, f"theme_tag_mapping_{PRIOR_MONTH_LABEL}.json")
+    if os.path.exists(prior_map_path):
+        prior_mapping = load_json(prior_map_path)
+        prior_mapping_str = json.dumps(prior_mapping, indent=2)
+        print(f"   Loaded prior month mapping from {prior_map_path}")
+
+# Format theme definitions for prompt
+themes_block = "\n".join(
+    f'- "{name}": {desc}' for name, desc in THEMES.items()
+)
+
+SYSTEM_3 = """You are a health insurance member experience strategist. You will map \
+granular tags to broad themes. A tag may belong to multiple themes, but only when the \
+tag's meaning genuinely serves both themes.
+
+Critical rule: The SAME tag word can mean different things in different themes. \
+For example, "claim_amount" belongs in Cost & Financial Experience, while \
+"claim_status_update" belongs in Claims Experience. Reason through each tag carefully \
+based on what operational question it answers, not just its surface words.
+
+When in doubt, assign to the theme where the tag has the most direct operational relevance."""
+
+USER_3 = f"""THEME DEFINITIONS:
+<themes>
+{themes_block}
+</themes>
+
+PRIOR MONTH MAPPING (use as reference for consistency — do not copy blindly):
+<prior_mapping>
+{prior_mapping_str}
+</prior_mapping>
+
+CURRENT MONTH TAG REPOSITORY:
+<tags>
+{json.dumps(tag_repository, indent=2)}
+</tags>
+
+For EACH tag, work through these steps:
+
+STEP 1 — UNDERSTAND THE TAG:
+State in your own words what specific member experience this tag captures.
+
+STEP 2 — MATCH TO THEME(S):
+For each theme, ask: "Would a member comment tagged with this tag contribute \
+meaningfully to this theme's story?" Assign only if yes — explain why.
+
+STEP 3 — RESOLVE AMBIGUOUS TAGS:
+For tags that could plausibly belong to multiple themes, reason through:
+- What specific aspect of this tag belongs to Theme A?
+- What specific aspect belongs to Theme B?
+- Is this tag genuinely dual-theme or is one assignment clearly stronger?
+
+STEP 4 — COMPARE TO PRIOR MONTH:
+If this tag existed last month, note if its theme assignment has changed and why.
+
+STEP 5 — OUTPUT:
+Return a JSON object where keys are theme names and values are arrays of tag names:
+{{
+  "Theme Name": ["tag1", "tag2", ...],
+  ...
+}}
+
+Every theme must appear as a key even if its tag list is empty.
+Return only the JSON object. No preamble, no markdown fences."""
+
+raw = call_llm(SYSTEM_3, USER_3, label="Theme-Tag Mapping")
+theme_tag_mapping = parse_json_response(raw, label="Theme-Tag Mapping")
+
+if theme_tag_mapping:
+    save_json(theme_tag_mapping, THEME_TAG_MAP_PATH)
+    print("✅ Theme → Tag mapping complete")
+    for theme, tags in theme_tag_mapping.items():
+        print(f"   {theme}: {len(tags)} tags")
+else:
+    raise RuntimeError("Theme-Tag mapping failed — check raw LLM output above")
+
+
+## ── CELL BREAK ── [8] STAGE 4A — PER-COMMENT ESSENCE + SENTIMENT
+
+print("📝 Stage 4A: Extracting per-comment essence and sentiment by theme...")
+
+# Build reverse map: comment_id → assigned tags
+comment_tag_map = {tc["comment_id"]: tc["assigned_tags"] for tc in tagged_comments}
+
+# Build comment text lookup
+comment_text_map = {c[COMMENT_ID_COL]: c[COMMENT_TEXT_COL] for c in comments}
+
+# For each theme, collect comments whose tags intersect with the theme's tag list
+theme_comments = defaultdict(list)  # theme → list of {comment_id, text}
+
+for comment_id, assigned_tags in comment_tag_map.items():
+    assigned_set = set(assigned_tags)
+    for theme, theme_tags in theme_tag_mapping.items():
+        if assigned_set & set(theme_tags):   # Intersection — comment belongs to this theme
+            theme_comments[theme].append({
+                "comment_id": comment_id,
+                "text": comment_text_map.get(comment_id, ""),
+                "tags": list(assigned_set & set(theme_tags))   # Only the relevant tags
+            })
+
+print("   Comments per theme:")
+for theme, clist in theme_comments.items():
+    print(f"   {theme}: {len(clist)} comments")
+
+# ── Now extract essence + sentiment per comment per theme ──────────────────────
+SYSTEM_4A = """You are a health insurance member experience analyst reading NPS survey \
+comments. For each comment, extract the core essence in the context of a specific theme \
+and assess sentiment strictly based on what the member wrote.
+
+Sentiment definitions:
+- POSITIVE: Member expresses satisfaction, praise, or a clearly good experience
+- NEGATIVE: Member expresses dissatisfaction, frustration, or a clearly bad experience
+- NEUTRAL: Member states facts without dominant emotional tone, or has genuinely \
+  mixed feelings with no clear direction
+
+Base your assessment only on the comment's own words — do not project emotions \
+the member did not express. Return only valid JSON."""
+
+# Store all essences: {theme → list of {comment_id, essence, sentiment, evidence}}
+all_essences = {}
+
+for theme, clist in theme_comments.items():
+    print(f"\n   Processing theme: {theme} ({len(clist)} comments)...")
+    theme_essences = []
+    theme_def = THEMES[theme]
+    batches = chunk_list(clist, 10)   # 10 comments per call for essence extraction
+
+    for batch_idx, batch in enumerate(tqdm(batches, desc=f"  Essences [{theme[:20]}]")):
+
+        comments_block = "\n".join(
+            f'[{c["comment_id"]}] {c["text"]}' for c in batch
+        )
+
+        USER_4A = f"""Theme: {theme}
+Theme definition: {theme_def}
+
+Below are member comments that have been associated with this theme.
+
+<comments>
+{comments_block}
+</comments>
+
+For EACH comment, work through these steps:
+
+STEP 1 — READ IN THEME CONTEXT:
+What is this member saying specifically as it relates to "{theme}"? \
+Identify the relevant portion of the comment.
+
+STEP 2 — EXTRACT ESSENCE:
+Write ONE precise sentence (max 20 words) capturing what the member experienced \
+or felt about this theme. Use the member's own language where natural. \
+Be specific — avoid vague summaries like "member had a bad experience."
+
+STEP 3 — ASSESS SENTIMENT:
+Based ONLY on the comment's tone and words — not your assumptions — assign \
+POSITIVE, NEGATIVE, or NEUTRAL. State the specific word or phrase that drove \
+your assessment.
+
+STEP 4 — OUTPUT:
+Return a JSON array, one object per comment:
+[
+  {{
+    "comment_id": "<id>",
+    "essence": "one precise sentence max 20 words",
+    "sentiment": "POSITIVE|NEGATIVE|NEUTRAL",
+    "sentiment_evidence": "brief quote or phrase from comment"
+  }}
+]
+
+Return only the JSON array. No preamble, no markdown fences."""
+
+        raw = call_llm(SYSTEM_4A, USER_4A, label=f"Essence {theme[:20]} batch {batch_idx+1}")
+        parsed = parse_json_response(raw, label=f"Essence {theme[:20]} batch {batch_idx+1}")
+
+        if parsed and isinstance(parsed, list):
+            theme_essences.extend(parsed)
+
+        time.sleep(0.5)
+
+    all_essences[theme] = theme_essences
+
+save_json(all_essences, ESSENCES_PATH)
+print(f"\n✅ Stage 4A complete — essences extracted for all themes")
+
+
+## ── CELL BREAK ── [9] STAGE 4B — THEME NARRATIVE GENERATION
+
+print("📖 Stage 4B: Generating theme narratives...")
+
+SYSTEM_4B = """You are a senior member experience strategist writing an executive briefing \
+for a health insurance plan's leadership team. You will synthesize member voices into a \
+clear, evidence-backed narrative for a specific theme.
+
+Your writing must be:
+- Grounded in the member essences provided — do not generalize beyond them
+- Specific — name the actual sub-issues members raised, not just the theme
+- Balanced — cover both positives and negatives proportionally to their volume
+- Actionable — the reader should understand what members want changed or continued
+- Concise — written for a busy executive, not an academic journal
+
+Return only valid JSON."""
+
+theme_narratives = {}
+
+for theme, essences in all_essences.items():
+    if not essences:
+        print(f"   ⏭️  Skipping {theme} — no essences")
+        continue
+
+    print(f"   Generating narrative: {theme}...")
+
+    # Aggregate sentiment counts (Python — not LLM)
+    pos  = [e for e in essences if e.get("sentiment") == "POSITIVE"]
+    neg  = [e for e in essences if e.get("sentiment") == "NEGATIVE"]
+    neu  = [e for e in essences if e.get("sentiment") == "NEUTRAL"]
+
+    # Prepare essence lists for prompt
+    neg_block = "\n".join(f'- [{e["comment_id"]}] {e["essence"]}' for e in neg)
+    pos_block = "\n".join(f'- [{e["comment_id"]}] {e["essence"]}' for e in pos)
+    neu_block = "\n".join(f'- [{e["comment_id"]}] {e["essence"]}' for e in neu)
+
+    # Pull sample original comments for quote selection (up to 30 per sentiment)
+    def get_originals(essence_list, n=30):
+        return "\n".join(
+            f'[{e["comment_id"]}] {comment_text_map.get(e["comment_id"], "")}'
+            for e in essence_list[:n]
+        )
+
+    originals_block = (
+        "NEGATIVE ORIGINALS:\n" + get_originals(neg) + "\n\n" +
+        "POSITIVE ORIGINALS:\n" + get_originals(pos)
+    )
+
+    USER_4B = f"""Theme: {theme}
+Theme definition: {THEMES[theme]}
+
+SENTIMENT COUNTS (Python-computed, exact):
+Total: {len(essences)} | Positive: {len(pos)} | Negative: {len(neg)} | Neutral: {len(neu)}
+
+NEGATIVE ESSENCES:
+<negatives>
+{neg_block if neg_block else "None"}
+</negatives>
+
+POSITIVE ESSENCES:
+<positives>
+{pos_block if pos_block else "None"}
+</positives>
+
+NEUTRAL ESSENCES:
+<neutrals>
+{neu_block if neu_block else "None"}
+</neutrals>
+
+ORIGINAL COMMENTS (for quote selection):
+<originals>
+{originals_block}
+</originals>
+
+Work through these steps:
+
+STEP 1 — IDENTIFY SUB-THEMES:
+Group the negative essences into 2–4 distinct sub-issues. Do the same for positives. \
+Name each sub-theme precisely — e.g., "long wait times for specialist appointments" \
+not just "access issues."
+
+STEP 2 — ASSESS WEIGHT:
+For each sub-theme estimate how many essences belong to it. \
+Which issues dominate? Which are minor?
+
+STEP 3 — SELECT REPRESENTATIVE QUOTES:
+From the original comments, select:
+- 2 quotes for negatives that best illustrate the top negative sub-themes
+- 1–2 quotes for positives that best illustrate what members appreciate
+Prefer specific, vivid quotes over vague ones.
+
+STEP 4 — WRITE THE NARRATIVE:
+Write 4–6 sentences covering:
+- What the dominant member experience is in this theme overall
+- The top 2 negative sub-themes with specifics
+- The top positive sub-theme
+- One sentence on what members appear to want improved or sustained
+
+STEP 5 — OUTPUT:
+Return a JSON object:
+{{
+  "theme": "{theme}",
+  "total_comments": {len(essences)},
+  "sentiment_split": {{"positive": {len(pos)}, "negative": {len(neg)}, "neutral": {len(neu)}}},
+  "negative_sub_themes": [{{"name": "...", "approx_count": N}}, ...],
+  "positive_sub_themes": [{{"name": "...", "approx_count": N}}, ...],
+  "representative_quotes": {{
+    "negative": ["quote 1", "quote 2"],
+    "positive": ["quote 1"]
+  }},
+  "narrative": "4-6 sentence executive summary paragraph"
+}}
+
+Return only the JSON object. No preamble, no markdown fences."""
+
+    raw = call_llm(SYSTEM_4B, USER_4B, label=f"Narrative {theme[:20]}")
+    parsed = parse_json_response(raw, label=f"Narrative {theme[:20]}")
+
+    if parsed:
+        theme_narratives[theme] = parsed
+        print(f"   ✅ {theme}: narrative generated")
+    else:
+        print(f"   ⚠️  {theme}: narrative parse failed")
+
+save_json(theme_narratives, NARRATIVES_PATH)
+print(f"\n✅ Stage 4B complete — narratives generated for {len(theme_narratives)} themes")
+
+
+## ── CELL BREAK ── [10] STAGE 6 — MONTH-OVER-MONTH COMPARISON (if prior month exists)
+
+mom_comparisons = {}
+
+if PRIOR_MONTH_LABEL:
+    prior_narratives_path = os.path.join(OUTPUT_DIR, f"theme_narratives_{PRIOR_MONTH_LABEL}.json")
+
+    if os.path.exists(prior_narratives_path):
+        print(f"📊 Stage 6: Month-over-month comparison ({PRIOR_MONTH_LABEL} → {MONTH_LABEL})...")
+        prior_narratives = load_json(prior_narratives_path)
+
+        SYSTEM_6 = """You are a health insurance member experience analyst producing a \
+month-over-month comparison for leadership. You will compare two months of theme narratives \
+and identify what has changed, persisted, or resolved.
+
+Be precise and evidence-based. Do not speculate beyond what the narratives contain. \
+Sentiment shift is meaningful only if the percentage change is more than 5 percentage points \
+— otherwise call it stable. Return only valid JSON."""
+
+        for theme in theme_narratives:
+            if theme not in prior_narratives:
+                print(f"   ⏭️  {theme}: no prior month data — skipping")
+                continue
+
+            print(f"   Comparing: {theme}...")
+            curr = theme_narratives[theme]
+            prior = prior_narratives[theme]
+
+            USER_6 = f"""Theme: {theme}
+
+PRIOR MONTH NARRATIVE ({PRIOR_MONTH_LABEL}):
+<prior>
+{json.dumps(prior, indent=2)}
+</prior>
+
+CURRENT MONTH NARRATIVE ({MONTH_LABEL}):
+<current>
+{json.dumps(curr, indent=2)}
+</current>
+
+Work through these steps:
+
+STEP 1 — COMPARE SUB-THEMES:
+List all negative sub-themes from both months. For each, classify as:
+- PERSISTING: present in both months
+- RESOLVED: in prior month only — no longer appearing
+- NEW: in current month only — newly surfaced
+Do the same for positive sub-themes.
+
+STEP 2 — SENTIMENT SHIFT:
+Compare the positive/negative/neutral percentage split between months. \
+Has it improved, worsened, or stayed flat? Is the shift meaningful (>5 pp) \
+or within noise?
+
+STEP 3 — KEY SIGNALS:
+What are the 1–2 most important things leadership should know about \
+how this theme has evolved this month?
+
+STEP 4 — OUTPUT:
+Return a JSON object:
+{{
+  "theme": "{theme}",
+  "sentiment_shift": {{
+    "prior": {{"positive": N, "negative": N, "neutral": N, "total": N}},
+    "current": {{"positive": N, "negative": N, "neutral": N, "total": N}},
+    "direction": "IMPROVED|WORSENED|STABLE",
+    "commentary": "one sentence on the shift"
+  }},
+  "persisting_negatives": ["sub-theme 1", ...],
+  "resolved_negatives": ["sub-theme 1", ...],
+  "new_negatives": ["sub-theme 1", ...],
+  "persisting_positives": ["sub-theme 1", ...],
+  "new_positives": ["sub-theme 1", ...],
+  "key_signals": "2-3 sentence leadership callout on what changed and why it matters"
+}}
+
+Return only the JSON object. No preamble, no markdown fences."""
+
+            raw = call_llm(SYSTEM_6, USER_6, label=f"MoM {theme[:20]}")
+            parsed = parse_json_response(raw, label=f"MoM {theme[:20]}")
+            if parsed:
+                mom_comparisons[theme] = parsed
+
+        mom_path = os.path.join(OUTPUT_DIR, f"mom_comparison_{PRIOR_MONTH_LABEL}_vs_{MONTH_LABEL}.json")
+        save_json(mom_comparisons, mom_path)
+        print(f"\n✅ Stage 6 complete — MoM comparison for {len(mom_comparisons)} themes")
+    else:
+        print(f"⏭️  Prior narratives not found at {prior_narratives_path} — skipping MoM")
+else:
+    print("⏭️  No prior month label provided — skipping MoM comparison")
+
+
+## ── CELL BREAK ── [11] STAGE 5 — BUILD OUTPUT EXCEL
+
+print("📊 Building Excel output...")
+
+with pd.ExcelWriter(EXCEL_OUTPUT_PATH, engine="openpyxl") as writer:
+
+    # ── Sheet 1: Comments Tagged ──────────────────────────────────────────────
+    # One row per comment per theme (comment can repeat across themes)
+    all_tags_set = sorted(set(t["tag"] for t in tag_repository))
+
+    rows = []
+    for tc in tagged_comments:
+        cid = tc["comment_id"]
+        assigned = set(tc["assigned_tags"])
+
+        # Find themes this comment belongs to
+        comment_themes = [
+            theme for theme, ttags in theme_tag_mapping.items()
+            if assigned & set(ttags)
+        ]
+
+        row = {
+            "comment_id": cid,
+            "comment_text": comment_text_map.get(cid, ""),
+            "themes": " | ".join(comment_themes),
+        }
+        # Binary columns for each tag
+        for tag in all_tags_set:
+            row[tag] = 1 if tag in assigned else 0
+
+        rows.append(row)
+
+    df_sheet1 = pd.DataFrame(rows)
+    df_sheet1.to_excel(writer, sheet_name="comments_tagged", index=False)
+
+    # ── Sheet 2: Tag Rollup ───────────────────────────────────────────────────
+    # Tag volume + which themes it appears under
+    tag_theme_map = defaultdict(list)
+    for theme, ttags in theme_tag_mapping.items():
+        for tag in ttags:
+            tag_theme_map[tag].append(theme)
+
+    # Count per tag across all tagged comments
+    tag_counts = defaultdict(int)
+    for tc in tagged_comments:
+        for tag in tc["assigned_tags"]:
+            tag_counts[tag] += 1
+
+    tag_rows = []
+    for t in tag_repository:
+        tag_rows.append({
+            "tag": t["tag"],
+            "description": t["description"],
+            "comment_count": tag_counts.get(t["tag"], 0),
+            "themes": " | ".join(tag_theme_map.get(t["tag"], [])),
+        })
+
+    df_sheet2 = pd.DataFrame(tag_rows).sort_values("comment_count", ascending=False)
+    df_sheet2.to_excel(writer, sheet_name="tag_rollup", index=False)
+
+    # ── Sheet 3: Theme Narratives ─────────────────────────────────────────────
+    narrative_rows = []
+    for theme, n in theme_narratives.items():
+        ss = n.get("sentiment_split", {})
+        total = n.get("total_comments", 0)
+        narrative_rows.append({
+            "theme":              theme,
+            "total_comments":     total,
+            "positive_count":     ss.get("positive", 0),
+            "negative_count":     ss.get("negative", 0),
+            "neutral_count":      ss.get("neutral", 0),
+            "pct_negative":       round(ss.get("negative", 0) / total * 100, 1) if total else 0,
+            "pct_positive":       round(ss.get("positive", 0) / total * 100, 1) if total else 0,
+            "negative_sub_themes": " | ".join(
+                f'{s["name"]} (~{s.get("approx_count","?")})'
+                for s in n.get("negative_sub_themes", [])
+            ),
+            "positive_sub_themes": " | ".join(
+                f'{s["name"]} (~{s.get("approx_count","?")})'
+                for s in n.get("positive_sub_themes", [])
+            ),
+            "quote_negative_1":   (n.get("representative_quotes", {}).get("negative", ["", ""])+[""])[0],
+            "quote_negative_2":   (n.get("representative_quotes", {}).get("negative", ["", ""])+[""])[1],
+            "quote_positive_1":   (n.get("representative_quotes", {}).get("positive", [""])+[""])[0],
+            "narrative":          n.get("narrative", ""),
+        })
+
+    df_sheet3 = pd.DataFrame(narrative_rows)
+    df_sheet3.to_excel(writer, sheet_name="theme_narratives", index=False)
+
+    # ── Sheet 4: MoM Comparison ───────────────────────────────────────────────
+    if mom_comparisons:
+        mom_rows = []
+        for theme, m in mom_comparisons.items():
+            ss = m.get("sentiment_shift", {})
+            mom_rows.append({
+                "theme":                theme,
+                "direction":            ss.get("direction", ""),
+                "sentiment_commentary": ss.get("commentary", ""),
+                "prior_negative":       ss.get("prior", {}).get("negative", ""),
+                "current_negative":     ss.get("current", {}).get("negative", ""),
+                "prior_positive":       ss.get("prior", {}).get("positive", ""),
+                "current_positive":     ss.get("current", {}).get("positive", ""),
+                "persisting_negatives": " | ".join(m.get("persisting_negatives", [])),
+                "resolved_negatives":   " | ".join(m.get("resolved_negatives", [])),
+                "new_negatives":        " | ".join(m.get("new_negatives", [])),
+                "persisting_positives": " | ".join(m.get("persisting_positives", [])),
+                "new_positives":        " | ".join(m.get("new_positives", [])),
+                "key_signals":          m.get("key_signals", ""),
+            })
+        df_sheet4 = pd.DataFrame(mom_rows)
+        df_sheet4.to_excel(writer, sheet_name="mom_comparison", index=False)
+
+print(f"✅ Excel output saved: {EXCEL_OUTPUT_PATH}")
+
+
+## ── CELL BREAK ── [12] VISUALIZATION — CURRENT MONTH DASHBOARD
+
+import matplotlib.pyplot as plt
+import matplotlib.patches as mpatches
+import plotly.graph_objects as go
+import plotly.express as px
+from plotly.subplots import make_subplots
+import warnings
+warnings.filterwarnings("ignore")
+
+# ── Prep data ─────────────────────────────────────────────────────────────────
+viz_rows = []
+for theme, n in theme_narratives.items():
+    ss = n.get("sentiment_split", {})
+    total = n.get("total_comments", 1)
+    viz_rows.append({
+        "theme":        theme,
+        "short_theme":  theme.split("&")[0].strip()[:22],
+        "total":        total,
+        "positive":     ss.get("positive", 0),
+        "negative":     ss.get("negative", 0),
+        "neutral":      ss.get("neutral", 0),
+        "pct_neg":      round(ss.get("negative", 0) / total * 100, 1),
+        "pct_pos":      round(ss.get("positive", 0) / total * 100, 1),
+        "narrative":    n.get("narrative", ""),
+    })
+
+df_viz = pd.DataFrame(viz_rows).sort_values("pct_neg", ascending=False)
+
+# ── Chart 1: Sentiment Stacked Bar ───────────────────────────────────────────
+fig1 = go.Figure()
+fig1.add_trace(go.Bar(
+    name="Negative", x=df_viz["short_theme"], y=df_viz["negative"],
+    marker_color="#E05050",
+    hovertemplate="<b>%{x}</b><br>Negative: %{y}<extra></extra>"
+))
+fig1.add_trace(go.Bar(
+    name="Neutral", x=df_viz["short_theme"], y=df_viz["neutral"],
+    marker_color="#C8C8C8",
+    hovertemplate="<b>%{x}</b><br>Neutral: %{y}<extra></extra>"
+))
+fig1.add_trace(go.Bar(
+    name="Positive", x=df_viz["short_theme"], y=df_viz["positive"],
+    marker_color="#4CAF7D",
+    hovertemplate="<b>%{x}</b><br>Positive: %{y}<extra></extra>"
+))
+fig1.update_layout(
+    barmode="stack",
+    title=f"Sentiment by Theme — {MONTH_LABEL}",
+    xaxis_title="Theme", yaxis_title="Comment Count",
+    legend=dict(orientation="h", yanchor="bottom", y=1.02),
+    height=450, template="plotly_white"
+)
+fig1.show()
+
+# ── Chart 2: % Negative ranked ────────────────────────────────────────────────
+fig2 = px.bar(
+    df_viz.sort_values("pct_neg", ascending=True),
+    x="pct_neg", y="short_theme", orientation="h",
+    color="pct_neg",
+    color_continuous_scale=["#4CAF7D", "#FFC107", "#E05050"],
+    labels={"pct_neg": "% Negative", "short_theme": "Theme"},
+    title=f"% Negative Sentiment by Theme — {MONTH_LABEL}",
+    text="pct_neg"
+)
+fig2.update_traces(texttemplate="%{text}%", textposition="outside")
+fig2.update_layout(height=400, template="plotly_white", coloraxis_showscale=False)
+fig2.show()
+
+# ── Chart 3: Volume Bubble Chart ──────────────────────────────────────────────
+fig3 = px.scatter(
+    df_viz,
+    x="pct_pos", y="pct_neg",
+    size="total", color="short_theme",
+    hover_name="theme",
+    hover_data={"total": True, "pct_pos": True, "pct_neg": True},
+    labels={"pct_pos": "% Positive", "pct_neg": "% Negative"},
+    title=f"Theme Landscape: % Positive vs % Negative (bubble = volume) — {MONTH_LABEL}",
+    height=500
+)
+fig3.update_layout(template="plotly_white", showlegend=True)
+fig3.show()
+
+print("✅ Current month charts rendered")
+
+
+## ── CELL BREAK ── [13] VISUALIZATION — MONTH-OVER-MONTH CHARTS
+
+if mom_comparisons:
+
+    mom_viz_rows = []
+    for theme, m in mom_comparisons.items():
+        ss = m.get("sentiment_shift", {})
+        prior  = ss.get("prior",   {})
+        current = ss.get("current", {})
+        pt = max(prior.get("total",   1), 1)
+        ct = max(current.get("total", 1), 1)
+        mom_viz_rows.append({
+            "theme":          theme,
+            "short_theme":    theme.split("&")[0].strip()[:22],
+            "direction":      ss.get("direction", "STABLE"),
+            "prior_pct_neg":  round(prior.get("negative",   0) / pt * 100, 1),
+            "current_pct_neg":round(current.get("negative", 0) / ct * 100, 1),
+            "prior_pct_pos":  round(prior.get("positive",   0) / pt * 100, 1),
+            "current_pct_pos":round(current.get("positive", 0) / ct * 100, 1),
+            "delta_neg":      round(current.get("negative", 0) / ct * 100, 1) -
+                              round(prior.get("negative",   0) / pt * 100, 1),
+            "new_neg_count":  len(m.get("new_negatives", [])),
+            "resolved_count": len(m.get("resolved_negatives", [])),
+            "key_signals":    m.get("key_signals", ""),
+        })
+
+    df_mom = pd.DataFrame(mom_viz_rows)
+
+    # ── MoM Chart 1: Delta in % Negative ────────────────────────────────────
+    df_mom_sorted = df_mom.sort_values("delta_neg", ascending=True)
+    colors = ["#4CAF7D" if d <= 0 else "#E05050" for d in df_mom_sorted["delta_neg"]]
+
+    fig4 = go.Figure(go.Bar(
+        x=df_mom_sorted["delta_neg"],
+        y=df_mom_sorted["short_theme"],
+        orientation="h",
+        marker_color=colors,
+        text=[f"{d:+.1f}pp" for d in df_mom_sorted["delta_neg"]],
+        textposition="outside",
+        hovertemplate="<b>%{y}</b><br>Change in % Negative: %{x:.1f}pp<extra></extra>"
+    ))
+    fig4.update_layout(
+        title=f"Change in % Negative: {PRIOR_MONTH_LABEL} → {MONTH_LABEL}",
+        xaxis_title="Percentage Point Change",
+        yaxis_title="Theme",
+        height=420, template="plotly_white"
+    )
+    fig4.show()
+
+    # ── MoM Chart 2: Grouped bar — prior vs current % negative ───────────────
+    fig5 = go.Figure()
+    fig5.add_trace(go.Bar(
+        name=f"% Neg {PRIOR_MONTH_LABEL}",
+        x=df_mom["short_theme"], y=df_mom["prior_pct_neg"],
+        marker_color="#FFAB91"
+    ))
+    fig5.add_trace(go.Bar(
+        name=f"% Neg {MONTH_LABEL}",
+        x=df_mom["short_theme"], y=df_mom["current_pct_neg"],
+        marker_color="#E05050"
+    ))
+    fig5.update_layout(
+        barmode="group",
+        title=f"% Negative — Prior vs Current Month by Theme",
+        xaxis_title="Theme", yaxis_title="% Negative",
+        height=420, template="plotly_white",
+        legend=dict(orientation="h", yanchor="bottom", y=1.02)
+    )
+    fig5.show()
+
+    # ── MoM Chart 3: Sub-theme status summary table ───────────────────────────
+    status_rows = []
+    for theme, m in mom_comparisons.items():
+        for st in m.get("new_negatives", []):
+            status_rows.append({"theme": theme[:20], "sub_theme": st, "status": "🔴 New Negative"})
+        for st in m.get("persisting_negatives", []):
+            status_rows.append({"theme": theme[:20], "sub_theme": st, "status": "🟡 Persisting"})
+        for st in m.get("resolved_negatives", []):
+            status_rows.append({"theme": theme[:20], "sub_theme": st, "status": "✅ Resolved"})
+        for st in m.get("new_positives", []):
+            status_rows.append({"theme": theme[:20], "sub_theme": st, "status": "🟢 New Positive"})
+        for st in m.get("persisting_positives", []):
+            status_rows.append({"theme": theme[:20], "sub_theme": st, "status": "💚 Persisting Pos"})
+
+    if status_rows:
+        df_status = pd.DataFrame(status_rows)
+        fig6 = go.Figure(data=[go.Table(
+            header=dict(
+                values=["<b>Theme</b>", "<b>Sub-Theme</b>", "<b>Status</b>"],
+                fill_color="#2C3E50", font=dict(color="white", size=12),
+                align="left"
+            ),
+            cells=dict(
+                values=[df_status["theme"], df_status["sub_theme"], df_status["status"]],
+                fill_color=[["#F8F9FA", "#FFFFFF"] * len(df_status)],
+                align="left", font=dict(size=11)
+            )
+        )])
+        fig6.update_layout(
+            title=f"Sub-Theme Status Matrix — {PRIOR_MONTH_LABEL} → {MONTH_LABEL}",
+            height=max(400, len(status_rows) * 30 + 100)
+        )
+        fig6.show()
+
+    print("✅ MoM charts rendered")
+else:
+    print("⏭️  No MoM data — skipping MoM charts")
+
+
+## ── CELL BREAK ── [14] NARRATIVE CARDS — per theme (rendered in notebook)
+
+from IPython.display import display, HTML
+
+def sentiment_pill(pct_pos, pct_neg):
+    if pct_neg >= 50:
+        color, label = "#E05050", "High Concern"
+    elif pct_neg >= 30:
+        color, label = "#FFC107", "Moderate Concern"
+    else:
+        color, label = "#4CAF7D", "Healthy"
+    return f'<span style="background:{color};color:white;padding:3px 10px;border-radius:12px;font-size:12px;font-weight:bold;">{label}</span>'
+
+cards_html = ""
+for theme, n in theme_narratives.items():
+    ss = n.get("sentiment_split", {})
+    total = max(n.get("total_comments", 1), 1)
+    pct_pos = round(ss.get("positive", 0) / total * 100, 1)
+    pct_neg = round(ss.get("negative", 0) / total * 100, 1)
+
+    neg_subs = " &nbsp;|&nbsp; ".join(
+        f'<b>{s["name"]}</b> (~{s.get("approx_count","?")})'
+        for s in n.get("negative_sub_themes", [])
+    )
+    pos_subs = " &nbsp;|&nbsp; ".join(
+        f'<b>{s["name"]}</b>'
+        for s in n.get("positive_sub_themes", [])
+    )
+    quotes_neg = "".join(
+        f'<blockquote style="border-left:3px solid #E05050;padding:4px 10px;margin:6px 0;color:#555;font-style:italic;">"{q}"</blockquote>'
+        for q in n.get("representative_quotes", {}).get("negative", [])
+    )
+    quotes_pos = "".join(
+        f'<blockquote style="border-left:3px solid #4CAF7D;padding:4px 10px;margin:6px 0;color:#555;font-style:italic;">"{q}"</blockquote>'
+        for q in n.get("representative_quotes", {}).get("positive", [])
+    )
+
+    # MoM signal box if available
+    mom_box = ""
+    if theme in mom_comparisons:
+        m = mom_comparisons[theme]
+        direction_colors = {"IMPROVED": "#4CAF7D", "WORSENED": "#E05050", "STABLE": "#888"}
+        d = m.get("sentiment_shift", {}).get("direction", "STABLE")
+        mom_box = f"""
+        <div style="background:#F0F4FF;border-radius:6px;padding:10px;margin-top:10px;font-size:13px;">
+            <b>MoM:</b> <span style="color:{direction_colors.get(d,'#888')};font-weight:bold;">{d}</span>
+            &nbsp;·&nbsp; {m.get('sentiment_shift',{}).get('commentary','')}
+            <br><br>{m.get('key_signals','')}
+        </div>"""
+
+    cards_html += f"""
+    <div style="border:1px solid #DDD;border-radius:10px;padding:16px;margin:14px 0;
+                box-shadow:0 2px 6px rgba(0,0,0,0.07);font-family:Arial,sans-serif;">
+        <div style="display:flex;justify-content:space-between;align-items:center;">
+            <h3 style="margin:0;font-size:16px;color:#1a1a2e;">{theme}</h3>
+            {sentiment_pill(pct_pos, pct_neg)}
+        </div>
+        <div style="margin:8px 0;font-size:13px;color:#555;">
+            <b>Total:</b> {total} comments &nbsp;|&nbsp;
+            🟢 {pct_pos}% Positive &nbsp;
+            🔴 {pct_neg}% Negative &nbsp;
+            ⚪ {round(ss.get("neutral",0)/total*100,1)}% Neutral
+        </div>
+        <p style="font-size:14px;color:#333;line-height:1.6;">{n.get("narrative","")}</p>
+        <div style="font-size:13px;margin-top:8px;">
+            <b style="color:#E05050;">Top Concerns:</b> {neg_subs}<br>
+            <b style="color:#4CAF7D;">Strengths:</b> {pos_subs}
+        </div>
+        <div style="margin-top:10px;">{quotes_neg}{quotes_pos}</div>
+        {mom_box}
+    </div>"""
+
+display(HTML(f"""
+<div style="max-width:860px;margin:auto;">
+    <h2 style="font-family:Arial;color:#1a1a2e;">
+        NPS Theme Analysis — {MONTH_LABEL}
+    </h2>
+    {cards_html}
+</div>
+"""))
+
+print("✅ Narrative cards rendered")

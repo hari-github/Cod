@@ -1,0 +1,1184 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>NPS Survey Analysis Dashboard (V2)</title>
+    <link
+        href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap"
+        rel="stylesheet">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+
+    <style>
+:root {
+            /* Light gray background like Streamlit */
+            --bg-color: #F0F2F6;
+            --card-bg: #FFFFFF;
+            --surface: #FFFFFF;
+            --surface2: rgba(255, 255, 255, 0.5);
+            --border-color: #E2E6EF;
+            --border: #E2E6EF;
+            --text-main: #1A2035;
+            --text-muted: #6B7A99;
+            --primary-accent: #3B6FF0;
+            --accent-light: #EEF2FE;
+            --positive: #58CF30;
+            --pos-light: #E8FDE8;
+            --negative: #EF4444;
+            --neg-light: #FDE8E8;
+            --neutral: #8AB9BF;
+            --neu-light: #E8F0F2;
+
+            --shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+            --shadow-md: 0 4px 16px rgba(0, 0, 0, 0.12);
+            --shadow-lg: 0 8px 24px rgba(0, 0, 0, 0.15);
+            --radius: 10px;
+            --radius-sm: 6px;
+            --r: 10px;
+            --r-sm: 6px;
+        }
+
+        *,
+        *::before,
+        *::after {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: var(--bg-color);
+            color: var(--text-main);
+            min-height: 100vh;
+            font-size: 14px;
+            line-height: 1.5;
+        }
+
+        h1,
+        h2,
+        h3,
+        h4 {
+            font-weight: 600;
+        }
+
+        /* Ver_3.py Gradient Header */
+        .header {
+            background: linear-gradient(135deg, #1A2035 0%, #2C3E6B 100%);
+            padding: 28px 40px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            max-width: 1260px;
+            margin: 24px auto 0;
+            border-radius: 12px;
+            box-shadow: 0 4px 20px rgba(0, 0, 0, 0.15);
+        }
+
+        .header-left h1 {
+            font-size: 1.4rem;
+            font-weight: 700;
+            color: #fff;
+            letter-spacing: -0.3px;
+        }
+
+        .header-meta {
+            font-size: 0.78rem;
+            color: rgba(255, 255, 255, 0.55);
+            margin-top: 3px;
+            font-family: 'IBM Plex Mono', monospace;
+        }
+
+        /* Main Container */
+        .main {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 28px 24px;
+        }
+
+        /* Tabs */
+        .tabs {
+            display: flex;
+            gap: 2px;
+            background: var(--surface2);
+            border-radius: var(--r);
+            padding: 4px;
+            margin-bottom: 18px;
+            width: fit-content;
+            margin-top: 18px;
+        }
+
+        .tab {
+            padding: 8px 18px;
+            border-radius: var(--r-sm);
+            font-size: 0.8rem;
+            font-weight: 500;
+            color: var(--text-muted);
+            cursor: pointer;
+            transition: all .2s;
+            user-select: none;
+            white-space: nowrap;
+        }
+
+        .tab:hover {
+            color: var(--text-main);
+        }
+
+        .tab.active {
+            background: var(--surface);
+            color: var(--primary-accent);
+            box-shadow: 0 1px 4px rgba(0, 0, 0, 0.1);
+            font-weight: 600;
+        }
+
+        /* Cards */
+        .card {
+            background: #FFFFFF;
+            border-radius: var(--r);
+            box-shadow: var(--shadow-md);
+            padding: 20px;
+            border: 1px solid #E8E8E8;
+        }
+
+        /* Tab Content Control */
+        .tab-content {
+            display: none;
+            animation: fadeIn 0.3s ease;
+        }
+
+        .tab-content.active {
+            display: block;
+        }
+
+        @keyframes fadeIn {
+            from {
+                opacity: 0;
+                transform: translateY(5px);
+            }
+
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+
+        /* Utilities */
+        .grid-2 {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 18px;
+        }
+
+        .grid-3 {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 18px;
+        }
+
+        .grid-4 {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 14px;
+        }
+
+        .mt {
+            margin-top: 18px;
+        }
+
+        /* New Badges / Pills */
+        .badge {
+            font-family: 'IBM Plex Mono', monospace;
+            padding: 4px 10px;
+            border-radius: var(--r-sm);
+            font-size: 0.72rem;
+            font-weight: 600;
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+        }
+
+        .badge.positive {
+            background: var(--pos-light);
+            color: var(--positive);
+            border: 1px solid rgba(45, 168, 106, 0.3);
+        }
+
+        .badge.negative {
+            background: var(--neg-light);
+            color: var(--negative);
+            border: 1px solid rgba(224, 69, 69, 0.3);
+        }
+
+        .badge.neutral {
+            background: var(--neu-light);
+            color: var(--neutral);
+            border: 1px solid rgba(138, 150, 176, 0.3);
+        }
+
+        .badge.warn {
+            background: var(--warn-light);
+            color: var(--warn);
+            border: 1px solid rgba(245, 158, 11, 0.3);
+        }
+
+        /* Stat Cards */
+        .stat-card {
+            position: relative;
+            overflow: hidden;
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: var(--r);
+            padding: 18px 20px;
+            box-shadow: var(--shadow);
+            backdrop-filter: blur(8px);
+            -webkit-backdrop-filter: blur(8px);
+        }
+
+        .stat-card::after {
+            content: '';
+            position: absolute;
+            bottom: 0;
+            left: 0;
+            right: 0;
+            height: 3px;
+        }
+
+        .stat-card.total::after {
+            background: var(--primary-accent);
+        }
+
+        .stat-card.pos::after {
+            background: var(--positive);
+        }
+
+        .stat-card.neu::after {
+            background: var(--neutral);
+        }
+
+        .stat-card.neg::after {
+            background: var(--negative);
+        }
+
+        /* Filter chips */
+        .fchip {
+            padding: 4px 12px;
+            border-radius: 20px;
+            font-size: 0.72rem;
+            font-weight: 500;
+            border: 1px solid var(--border);
+            background: var(--surface);
+            color: var(--text-muted);
+            cursor: pointer;
+            transition: all .15s;
+        }
+
+        .fchip:hover,
+        .fchip.active {
+            border-color: var(--primary-accent);
+            color: var(--primary-accent);
+            background: var(--accent-light);
+        }
+    </style>
+</head>
+
+<body>
+
+    <!-- FULL WIDTH HEADER -->
+    <div class="header">
+        <div class="header-left">
+            <h1><i class="fa-solid fa-chart-pie" style="color:var(--primary-accent); margin-right:8px;"></i> NPS
+                Insights</h1>
+            <div class="header-meta">Data from <span id="meta-month"></span> | <span id="meta-total"></span> Total
+                Comments</div>
+        </div>
+        <button
+            style="padding:10px 20px; background:rgba(255,255,255,0.1); border:1px solid rgba(255,255,255,0.2); border-radius:8px; cursor:pointer; color:#fff; font-weight:600; font-size:12px; transition: background 0.2s;"
+            onmouseover="this.style.background='rgba(255,255,255,0.2)'"
+            onmouseout="this.style.background='rgba(255,255,255,0.1)'"><i class="fa-solid fa-download"></i> Export
+            PDF</button>
+    </div>
+
+    <!-- MAIN CONTAINER -->
+    <div class="main">
+
+        <!-- KPI STAT CARDS (ALWAYS VISIBLE) -->
+        <div class="grid-4">
+            <div class="stat-card" style="padding:20px 24px;">
+                <div style="color:var(--text-muted); font-size:0.68rem; font-weight:600; text-transform:uppercase; letter-spacing:1px;">Total Comments</div>
+                <div style="display:flex; align-items:baseline; gap:8px;">
+                    <span id="ov-total" style="font-size:2rem; font-weight:700; line-height:1.2;">-</span>
+                    <span id="mom-total" style="font-size:0.75rem; color:var(--text-muted);"></span>
+                </div>
+            </div>
+            <div class="stat-card" style="padding:20px 24px;">
+                <div style="color:var(--text-muted); font-size:0.68rem; font-weight:600; text-transform:uppercase; letter-spacing:1px;">Positive</div>
+                <div style="display:flex; align-items:baseline; gap:8px;">
+                    <span id="ov-pos" style="font-size:2rem; font-weight:700; color:var(--positive); line-height:1.2;">-</span>
+                    <span id="mom-pos" style="font-size:0.75rem; color:var(--text-muted);"></span>
+                </div>
+            </div>
+            <div class="stat-card" style="padding:20px 24px;">
+                <div style="color:var(--text-muted); font-size:0.68rem; font-weight:600; text-transform:uppercase; letter-spacing:1px;">Neutral</div>
+                <div style="display:flex; align-items:baseline; gap:8px;">
+                    <span id="ov-neu" style="font-size:2rem; font-weight:700; color:var(--neutral); line-height:1.2;">-</span>
+                    <span id="mom-neu" style="font-size:0.75rem; color:var(--text-muted);"></span>
+                </div>
+            </div>
+            <div class="stat-card" style="padding:20px 24px;">
+                <div style="color:var(--text-muted); font-size:0.68rem; font-weight:600; text-transform:uppercase; letter-spacing:1px;">Negative</div>
+                <div style="display:flex; align-items:baseline; gap:8px;">
+                    <span id="ov-neg" style="font-size:2rem; font-weight:700; color:var(--negative); line-height:1.2;">-</span>
+                    <span id="mom-neg" style="font-size:0.75rem; color:var(--text-muted);"></span>
+                </div>
+            </div>
+        </div>
+
+        <!-- HORIZONTAL TABS -->
+        <div class="tabs">
+            <div class="tab active" onclick="switchTab('overview', this)"><i class="fa-solid fa-chart-simple"></i>
+                Overview</div>
+            <div class="tab" onclick="switchTab('themes', this)"><i class="fa-solid fa-layer-group"></i> Theme Deep Dive
+            </div>
+            <div class="tab" onclick="switchTab('comments', this)"><i class="fa-solid fa-comments"></i> Comment
+                Drill-Down</div>
+            <div class="tab" onclick="switchTab('mom', this)"><i class="fa-solid fa-arrow-trend-up"></i>
+                Month-over-Month</div>
+            <div class="tab" onclick="switchTab('tags', this)"><i class="fa-solid fa-tags"></i> Tag Explorer</div>
+        </div>
+
+        <!-- TAB CONTENT: OVERVIEW -->
+        <div id="overview" class="tab-content active">
+            <div class="grid-2">
+                <div class="card">
+                    <h3
+                        style="margin-bottom: 20px; font-size:0.85rem; text-transform:uppercase; color:var(--text-muted); letter-spacing:1px;">
+                        Overall Sentiment</h3>
+                    <div style="height: 300px; display:flex; justify-content:center;">
+                        <canvas id="sentimentDonut"></canvas>
+                    </div>
+                </div>
+                <div class="card">
+                    <h3
+                        style="margin-bottom: 20px; font-size:0.85rem; text-transform:uppercase; color:var(--text-muted); letter-spacing:1px;">
+                        Theme Landscape (Sentiment Split)</h3>
+                    <div id="theme-heatmap"
+                        style="display:flex; flex-direction:column; gap:12px; max-height:300px; overflow-y:auto; padding-right:10px;">
+                        <!-- Heatmap bars injected here -->
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- TAB CONTENT: THEMES -->
+        <div id="themes" class="tab-content">
+            <div style="display:flex; gap:24px;">
+                <!-- Theme Selector (Left) -->
+                <div class="card" style="width: 300px; flex-shrink: 0;">
+                    <h3 style="margin-bottom: 16px; font-size:0.85rem; text-transform:uppercase; color:var(--text-muted); letter-spacing:1px;">Themes</h3>
+                    <div id="theme-selector-list" style="display:flex; flex-direction:column; gap:10px;">
+                        <!-- Selector items injected here -->
+                    </div>
+                </div>
+
+                <!-- Theme Detail Panel (Right) -->
+                <div class="card" style="flex-grow: 1;" id="theme-detail-panel">
+                    <!-- Detail content injected here -->
+                </div>
+            </div>
+        </div>
+
+        <!-- TAB CONTENT: COMMENTS -->
+        <div id="comments" class="tab-content">
+            <div class="card" style="margin-bottom: 18px; box-shadow:none; padding:16px;">
+                <div style="display:flex; gap:16px;">
+                    <input type="text" id="comment-search" placeholder="Search comments..."
+                        style="flex-grow:1; padding:10px 14px; border:1px solid var(--border); border-radius:8px; font-family:'Inter',sans-serif; outline:none;"
+                        onfocus="this.style.borderColor='var(--primary-accent)'"
+                        onblur="this.style.borderColor='var(--border)'">
+                    <select id="filter-theme"
+                        style="padding:10px 14px; border:1px solid var(--border); border-radius:8px; min-width:200px; font-family:'Inter',sans-serif; outline:none;">
+                        <option value="All">All Themes</option>
+                    </select>
+                    <select id="filter-month"
+                        style="padding:10px 14px; border:1px solid var(--border); border-radius:8px; font-family:'Inter',sans-serif; outline:none;">
+                        <option value="All">All Months</option>
+                    </select>
+                    <select id="filter-sentiment"
+                        style="padding:10px 14px; border:1px solid var(--border); border-radius:8px; font-family:'Inter',sans-serif; outline:none;">
+                        <option value="All">All Sentiments</option>
+                        <option value="POSITIVE">Positive</option>
+                        <option value="NEGATIVE">Negative</option>
+                        <option value="NEUTRAL">Neutral</option>
+                    </select>
+                </div>
+            </div>
+            <div class="card" style="overflow-x:auto;">
+                <table style="width:100%; border-collapse:collapse; text-align:left; font-size:14px;">
+                    <thead>
+                        <tr style="border-bottom:1px solid var(--border); background:var(--surface2);">
+                            <th
+                                style="padding:12px; color:var(--text-muted); font-size:12px; text-transform:uppercase; letter-spacing:1px; width:120px;">
+                                ID & Month</th>
+                            <th
+                                style="padding:12px; color:var(--text-muted); font-size:12px; text-transform:uppercase; letter-spacing:1px;">
+                                Comment</th>
+                            <th
+                                style="padding:12px; color:var(--text-muted); font-size:12px; text-transform:uppercase; letter-spacing:1px; width:200px;">
+                                Themes & Tags</th>
+                            <th
+                                style="padding:12px; color:var(--text-muted); font-size:12px; text-transform:uppercase; letter-spacing:1px; width:120px;">
+                                Sentiment</th>
+                        </tr>
+                    </thead>
+                    <tbody id="comments-table-body">
+                        <!-- Comments injected here -->
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <!-- TAB CONTENT: MOM -->
+        <div id="mom" class="tab-content">
+            <div style="display:flex; gap:16px; margin-bottom:20px; align-items:center;">
+                <label style="font-size:14px; font-weight:600; color:var(--text-main);">Sentiment View:</label>
+                <select id="mom-sentiment-filter" onchange="renderMomChart()" style="padding:8px 14px; border:1px solid var(--border); border-radius:8px; font-family:'Inter',sans-serif; outline:none;">
+                    <option value="negative">% Negative</option>
+                    <option value="positive">% Positive</option>
+                    <option value="neutral">% Neutral</option>
+                </select>
+            </div>
+            <div class="grid-2" style="margin-bottom: 24px;">
+                <div class="card">
+                    <h3 style="margin-bottom: 20px; font-size:0.85rem; text-transform:uppercase; color:var(--text-muted); letter-spacing:1px;">
+                        Prior vs Current Month Comparison</h3>
+                    <div style="height: 350px;">
+                        <canvas id="momGroupedChart"></canvas>
+                    </div>
+                </div>
+                <div class="card" style="overflow-y:auto; max-height:430px;">
+                    <h3
+                        style="margin-bottom: 20px; font-size:0.85rem; text-transform:uppercase; color:var(--text-muted); letter-spacing:1px;">
+                        Sub-Theme Status Matrix</h3>
+                    <table style="width:100%; border-collapse:collapse; text-align:left; font-size:14px;">
+                        <thead style="position: sticky; top: 0; background: var(--surface);">
+                            <tr style="border-bottom:1px solid var(--border); background:var(--surface2);">
+                                <th
+                                    style="padding:12px; color:var(--text-muted); font-size:12px; text-transform:uppercase; letter-spacing:1px;">
+                                    Theme</th>
+                                <th
+                                    style="padding:12px; color:var(--text-muted); font-size:12px; text-transform:uppercase; letter-spacing:1px;">
+                                    Sub-Theme</th>
+                                <th
+                                    style="padding:12px; color:var(--text-muted); font-size:12px; text-transform:uppercase; letter-spacing:1px;">
+                                    Status</th>
+                            </tr>
+                        </thead>
+                        <tbody id="mom-matrix-body">
+                            <!-- Matrix rows injected here -->
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            <h3 style="margin-bottom: 16px; font-size:0.9rem;">Key Signals & Commentary</h3>
+            <div id="mom-signals-container" class="grid-2">
+                <!-- Signal cards injected here -->
+            </div>
+        </div>
+
+        <!-- TAB CONTENT: TAGS -->
+        <div id="tags" class="tab-content">
+            <div class="card" style="margin-bottom: 18px; box-shadow:none; padding:16px;">
+                <div style="display:flex; gap:16px;">
+                    <input type="text" id="tag-search" placeholder="Search tags or descriptions..."
+                        style="flex-grow:1; padding:10px 14px; border:1px solid var(--border); border-radius:8px; font-family:'Inter',sans-serif; outline:none;"
+                        onfocus="this.style.borderColor='var(--primary-accent)'"
+                        onblur="this.style.borderColor='var(--border)'">
+                </div>
+            </div>
+            <div class="card" style="overflow-x:auto;">
+                <table style="width:100%; border-collapse:collapse; text-align:left; font-size:14px;">
+                    <thead>
+                        <tr style="border-bottom:1px solid var(--border); background:var(--surface2);">
+                            <th
+                                style="padding:12px; color:var(--text-muted); font-size:12px; text-transform:uppercase; letter-spacing:1px; width:200px;">
+                                Tag</th>
+                            <th
+                                style="padding:12px; color:var(--text-muted); font-size:12px; text-transform:uppercase; letter-spacing:1px;">
+                                Description</th>
+                            <th
+                                style="padding:12px; color:var(--text-muted); font-size:12px; text-transform:uppercase; letter-spacing:1px; width:100px;">
+                                Volume</th>
+                            <th
+                                style="padding:12px; color:var(--text-muted); font-size:12px; text-transform:uppercase; letter-spacing:1px; width:250px;">
+                                Associated Themes</th>
+                        </tr>
+                    </thead>
+                    <tbody id="tags-table-body">
+                        <!-- Tags injected here -->
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    <!-- DUMMY DATA INJECTION -->
+    <script>
+        const dashboardData = {
+            "metadata": {
+                "current_month": "2026-04",
+                "prior_month": "2026-03",
+                "total_comments": 150
+            },
+            "theme_narratives": {
+                "Customer Service": {
+                    "theme": "Customer Service",
+                    "total_comments": 45,
+                    "sentiment_split": { "positive": 20, "negative": 15, "neutral": 10 },
+                    "negative_sub_themes": [
+                        { "name": "long hold time", "approx_count": 10 },
+                        { "name": "rude rep", "approx_count": 5 }
+                    ],
+                    "positive_sub_themes": [
+                        { "name": "helpful agent", "approx_count": 12 },
+                        { "name": "issue resolved", "approx_count": 8 }
+                    ],
+                    "representative_quotes": {
+                        "negative": ["I was on hold for over 45 minutes just to ask a simple question.", "The representative was extremely unhelpful and disconnected the call."],
+                        "positive": ["Jane was wonderful and explained my benefits clearly.", "My issue was resolved immediately by the very polite agent."]
+                    },
+                    "narrative": "Customer Service presents a polarized experience this month. A significant portion of members praised agents for being helpful and resolving issues quickly. However, the dominant negative theme remains long hold times, frustrating members before they even speak to an agent. Leadership should focus on reducing queue times while maintaining the high quality of agent interactions."
+                },
+                "Claims Experience": {
+                    "theme": "Claims Experience",
+                    "total_comments": 60,
+                    "sentiment_split": { "positive": 10, "negative": 40, "neutral": 10 },
+                    "negative_sub_themes": [
+                        { "name": "claim denial", "approx_count": 25 },
+                        { "name": "slow processing", "approx_count": 15 }
+                    ],
+                    "positive_sub_themes": [
+                        { "name": "easy submission", "approx_count": 10 }
+                    ],
+                    "representative_quotes": {
+                        "negative": ["My claim was denied for no clear reason after waiting 3 weeks.", "Processing takes entirely too long, I am still waiting on reimbursement from January."],
+                        "positive": ["The online portal made it very easy to submit my out-of-network claim."]
+                    },
+                    "narrative": "Claims Experience is currently the largest area of concern. Members are highly frustrated by unexpected claim denials and the slow speed of processing and reimbursement. While the front-end submission process is viewed positively, the back-end resolution is severely impacting trust. Communication around why claims are denied needs immediate improvement."
+                }
+            },
+            "comments": [
+                {
+                    "response_id": "a1b2c3d4",
+                    "month": "2026-04",
+                    "text": "I was on hold for over 45 minutes just to ask a simple question. It is unacceptable.",
+                    "themes": ["Customer Service"],
+                    "tags": ["long_hold_time"],
+                    "sentiment": "NEGATIVE",
+                    "essence": "Frustrated by excessive wait times.",
+                    "sentiment_evidence": "unacceptable"
+                },
+                {
+                    "response_id": "e5f6g7h8",
+                    "month": "2026-04",
+                    "text": "Jane was wonderful and explained my benefits clearly. She was very patient.",
+                    "themes": ["Customer Service"],
+                    "tags": ["helpful_agent"],
+                    "sentiment": "POSITIVE",
+                    "essence": "Pleased with patient, clear explanation.",
+                    "sentiment_evidence": "wonderful"
+                },
+                {
+                    "response_id": "i9j0k1l2",
+                    "month": "2026-04",
+                    "text": "My claim was denied for no clear reason after waiting 3 weeks. I called customer service but they couldn't help either.",
+                    "themes": ["Claims Experience", "Customer Service"],
+                    "tags": ["claim_denial", "unhelpful_agent"],
+                    "sentiment": "NEGATIVE",
+                    "essence": "Frustrated by unexplained claim denial and lack of support.",
+                    "sentiment_evidence": "no clear reason"
+                },
+                {
+                    "response_id": "m3n4o5p6",
+                    "month": "2026-04",
+                    "text": "The online portal made it very easy to submit my out-of-network claim.",
+                    "themes": ["Claims Experience"],
+                    "tags": ["easy_submission"],
+                    "sentiment": "POSITIVE",
+                    "essence": "Found portal submission easy.",
+                    "sentiment_evidence": "very easy"
+                },
+                {
+                    "response_id": "q7r8s9t0",
+                    "month": "2026-04",
+                    "text": "The rep I spoke to was okay, answered my question eventually.",
+                    "themes": ["Customer Service"],
+                    "tags": ["average_experience"],
+                    "sentiment": "NEUTRAL",
+                    "essence": "Received acceptable but unremarkable service.",
+                    "sentiment_evidence": "was okay"
+                }
+            ],
+            "mom_comparisons": {
+                "Customer Service": {
+                    "theme": "Customer Service",
+                    "sentiment_shift": {
+                        "prior": { "positive": 15, "negative": 25, "neutral": 5 },
+                        "current": { "positive": 20, "negative": 15, "neutral": 10 },
+                        "direction": "IMPROVED",
+                        "commentary": "Positive sentiment increased by 11pp, driven by better issue resolution."
+                    },
+                    "representative_quotes": {
+                        "prior": ["I waited forever to talk to someone and they were rude.", "Hold times are unacceptable."],
+                        "current": ["The agent picked up quickly and solved my problem immediately.", "Jane was wonderful and explained my benefits clearly."]
+                    },
+                    "persisting_negatives": ["long hold time"],
+                    "resolved_negatives": ["dropped calls"],
+                    "new_negatives": [],
+                    "persisting_positives": ["helpful agent"],
+                    "new_positives": ["issue resolved"],
+                    "key_signals": "Queue times remain a persisting issue, but once connected, agent performance has noticeably improved this month resulting in higher overall satisfaction."
+                },
+                "Claims Experience": {
+                    "theme": "Claims Experience",
+                    "sentiment_shift": {
+                        "prior": { "positive": 12, "negative": 38, "neutral": 10 },
+                        "current": { "positive": 10, "negative": 40, "neutral": 10 },
+                        "direction": "STABLE",
+                        "commentary": "Sentiment remains predominantly negative with no meaningful shift."
+                    },
+                    "representative_quotes": {
+                        "prior": ["My claim was denied without any explanation.", "Took 4 weeks to get reimbursed."],
+                        "current": ["My claim was denied for no clear reason after waiting 3 weeks.", "Still waiting on my claim from last month, status is totally unclear."]
+                    },
+                    "persisting_negatives": ["claim denial", "slow processing"],
+                    "resolved_negatives": [],
+                    "new_negatives": ["status unclear"],
+                    "persisting_positives": ["easy submission"],
+                    "new_positives": [],
+                    "key_signals": "No improvement in claims processing. Members are now additionally highlighting that claim status is unclear during the waiting period."
+                }
+            },
+            "tag_explorer": [
+                { "tag": "long_hold_time", "description": "Members reporting waiting over 10 minutes to speak to an agent.", "comment_count": 10, "themes": ["Customer Service"] },
+                { "tag": "claim_denial", "description": "Unexpected or unexplained rejection of a submitted claim.", "comment_count": 25, "themes": ["Claims Experience"] },
+                { "tag": "helpful_agent", "description": "Positive feedback highlighting a knowledgeable and polite representative.", "comment_count": 12, "themes": ["Customer Service"] },
+                { "tag": "slow_processing", "description": "Delays in claim review or reimbursement times.", "comment_count": 15, "themes": ["Claims Experience"] },
+                { "tag": "easy_submission", "description": "Praise for the digital or mail-in process for filing a claim.", "comment_count": 10, "themes": ["Claims Experience"] }
+            ]
+        };
+
+        // Initialization
+        document.getElementById('meta-month').innerText = dashboardData.metadata.current_month;
+        document.getElementById('meta-total').innerText = dashboardData.metadata.total_comments;
+
+        // Navigation Logic
+        function switchTab(tabId, element) {
+            document.querySelectorAll('.tab').forEach(el => el.classList.remove('active'));
+            element.classList.add('active');
+
+            document.querySelectorAll('.tab-content').forEach(el => el.classList.remove('active'));
+            document.getElementById(tabId).classList.add('active');
+        }
+
+        // Render Overview Tab
+        function renderOverview() {
+        // Data Processing for Overview
+        let totalPos = 0, totalNeg = 0, totalNeu = 0, totalComments = 0;
+        const themeStats = [];
+
+        // Current month only
+        Object.values(dashboardData.theme_narratives).forEach(theme => {
+            const split = theme.sentiment_split;
+            totalPos += split.positive;
+            totalNeg += split.negative;
+            totalNeu += split.neutral;
+            totalComments += theme.total_comments;
+
+            const pctNeg = theme.total_comments > 0 ? (split.negative / theme.total_comments) * 100 : 0;
+            const pctPos = theme.total_comments > 0 ? (split.positive / theme.total_comments) * 100 : 0;
+            const pctNeu = theme.total_comments > 0 ? (split.neutral / theme.total_comments) * 100 : 0;
+            themeStats.push({ name: theme.theme, pctNeg: pctNeg, pctPos: pctPos, pctNeu: pctNeu, ...split });
+        });
+        
+        const actualTotal = totalPos + totalNeu + totalNeg;
+
+        // Update Overview KPIs
+        document.getElementById('ov-total').innerText = actualTotal;
+        document.getElementById('ov-pos').innerText = totalPos;
+        document.getElementById('ov-neg').innerText = totalNeg;
+        document.getElementById('ov-neu').innerText = totalNeu;
+
+        // MoM Trend Arrows
+        if (dashboardData.mom_comparisons && Object.keys(dashboardData.mom_comparisons).length > 0) {
+            let momPosChange = 0, momNegChange = 0, momNeuChange = 0;
+            let themeCount = 0;
+            Object.values(dashboardData.mom_comparisons).forEach(mom => {
+                const shift = mom.sentiment_shift;
+                if (shift && shift.prior && shift.current) {
+                    const priorTotal = shift.prior.positive + shift.prior.negative + shift.prior.neutral;
+                    const currTotal = shift.current.positive + shift.current.negative + shift.current.neutral;
+                    if (priorTotal > 0 && currTotal > 0) {
+                        momPosChange += ((shift.current.positive/currTotal) - (shift.prior.positive/priorTotal)) * 100;
+                        momNegChange += ((shift.current.negative/currTotal) - (shift.prior.negative/priorTotal)) * 100;
+                        momNeuChange += ((shift.current.neutral/currTotal) - (shift.prior.neutral/priorTotal)) * 100;
+                        themeCount++;
+                    }
+                }
+            });
+            if (themeCount > 0) {
+                const formatTrend = (val) => {
+                    const arrow = val > 0 ? '↑' : (val < 0 ? '↓' : '→');
+                    return `${arrow} ${Math.abs(val).toFixed(1)}%`;
+                };
+                document.getElementById('mom-total').innerHTML = formatTrend(0);
+                document.getElementById('mom-pos').innerHTML = formatTrend(momPosChange/themeCount);
+                document.getElementById('mom-neg').innerHTML = formatTrend(momNegChange/themeCount);
+                document.getElementById('mom-neu').innerHTML = formatTrend(momNeuChange/themeCount);
+            }
+        }
+
+        // Render Donut Chart
+        const ctxDonut = document.getElementById('sentimentDonut').getContext('2d');
+        new Chart(ctxDonut, {
+            type: 'doughnut',
+            data: {
+                labels: ['Positive', 'Neutral', 'Negative'],
+                datasets: [{
+                    data: [totalPos, totalNeu, totalNeg],
+                    backgroundColor: ['#58CF30', '#8AB9BF', '#EF4444'],
+                    borderWidth: 0,
+                    hoverOffset: 4
+                }]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                cutout: '60%',
+                plugins: {
+                    legend: { position: 'bottom', labels: { font: { family: "'Inter', sans-serif" } } }
+                }
+            }
+        });
+
+        // Render Theme Heatmap (Ver_3 styled stacked bars)
+        themeStats.sort((a, b) => b.pctNeg - a.pctNeg);
+        const heatmapContainer = document.getElementById('theme-heatmap');
+        themeStats.forEach(t => {
+            const total = t.positive + t.neutral + t.negative;
+            heatmapContainer.innerHTML += `
+                <div style="margin-bottom: 14px;">
+                    <div style="display:flex; justify-content:space-between; margin-bottom:6px; font-size:13px; font-weight:600;">
+                        <span>${t.name}</span>
+                        <span style="font-family:'IBM Plex Mono', monospace; font-size:11px; color:var(--text-muted);">
+                            <span style="color:var(--positive);">${t.pctPos.toFixed(0)}% (${t.positive})</span> | 
+                            <span style="color:var(--neutral);">${t.pctNeu.toFixed(0)}% (${t.neutral})</span> | 
+                            <span style="color:var(--negative);">${t.pctNeg.toFixed(0)}% (${t.negative})</span>
+                        </span>
+                    </div>
+                    <div style="width:100%; display:flex; height:14px; border-radius:4px; overflow:hidden; background:var(--surface2);">
+                        <div style="width:${t.pctPos}%; background:var(--positive); height:100%;"></div>
+                        <div style="width:${t.pctNeu}%; background:var(--neutral); height:100%;"></div>
+                        <div style="width:${t.pctNeg}%; background:var(--negative); height:100%;"></div>
+                    </div>
+                </div>
+            `;
+        });
+
+        }
+
+        // Render Theme Deep Dive
+        function renderThemeDeepDive() {
+            const selectorList = document.getElementById('theme-selector-list');
+            const detailPanel = document.getElementById('theme-detail-panel');
+
+            Object.values(dashboardData.theme_narratives).forEach((theme, index) => {
+                const total = theme.total_comments;
+                const pctPos = total > 0 ? ((theme.sentiment_split.positive / total) * 100).toFixed(0) : 0;
+                const pctNeu = total > 0 ? ((theme.sentiment_split.neutral / total) * 100).toFixed(0) : 0;
+                const pctNeg = total > 0 ? ((theme.sentiment_split.negative / total) * 100).toFixed(0) : 0;
+
+                const selectorItem = document.createElement('div');
+                const isSelected = index === 0;
+                selectorItem.style.cssText = `padding: 16px; cursor: pointer; border: 2px solid ${isSelected ? 'var(--primary-accent)' : '#E8E8E8'}; border-radius: 10px; background: ${isSelected ? '#EEF2FE' : '#FFFFFF'}; box-shadow: ${isSelected ? '0 4px 12px rgba(59, 111, 240, 0.25)' : '0 2px 6px rgba(0,0,0,0.06)'}; transition: all 0.2s ease;`;
+                selectorItem.innerHTML = `
+                    <div style="font-weight:600; margin-bottom:6px; color:${isSelected ? 'var(--primary-accent)' : 'var(--text-main)'};">${theme.theme}</div>
+                    <div style="font-size:12px; color:var(--text-muted); font-family:'IBM Plex Mono', monospace; margin-bottom:4px;">Vol: ${total}</div>
+                    <div style="font-size:11px; font-family:'IBM Plex Mono', monospace;">
+                        <span style="color:var(--positive);">Pos: ${pctPos}%</span> | 
+                        <span style="color:var(--neutral);">Neu: ${pctNeu}%</span> | 
+                        <span style="color:var(--negative);">Neg: ${pctNeg}%</span>
+                    </div>
+                `;
+
+                selectorItem.onclick = () => {
+                    Array.from(selectorList.children).forEach(child => {
+                        child.style.borderColor = '#E8E8E8';
+                        child.style.background = '#FFFFFF';
+                        child.style.boxShadow = '0 2px 6px rgba(0,0,0,0.06)';
+                        if (child.children[0]) child.children[0].style.color = 'var(--text-main)';
+                    });
+                    selectorItem.style.borderColor = 'var(--primary-accent)';
+                    selectorItem.style.background = '#EEF2FE';
+                    selectorItem.style.boxShadow = '0 4px 12px rgba(59, 111, 240, 0.25)';
+                    selectorItem.children[0].style.color = 'var(--primary-accent)';
+                    renderThemeDetail(theme);
+                };
+
+                selectorList.appendChild(selectorItem);
+                if (index === 0) renderThemeDetail(theme);
+            });
+        }
+
+        function renderThemeDetail(theme) {
+            const panel = document.getElementById('theme-detail-panel');
+            const total = theme.total_comments;
+            const posPct = ((theme.sentiment_split.positive / total) * 100).toFixed(1);
+            const negPct = ((theme.sentiment_split.negative / total) * 100).toFixed(1);
+            const neuPct = ((theme.sentiment_split.neutral / total) * 100).toFixed(1);
+
+            let badgeClass = 'neutral';
+            let badgeText = 'Healthy';
+            let icon = 'fa-check-circle';
+            if (negPct > 50) { badgeClass = 'negative'; badgeText = 'High Concern'; icon = 'fa-circle-exclamation'; }
+            else if (negPct > 30) { badgeClass = 'warn'; badgeText = 'Moderate Concern'; icon = 'fa-triangle-exclamation'; }
+            else if (posPct > 50) { badgeClass = 'positive'; badgeText = 'Excellent'; icon = 'fa-star'; }
+
+            const negSubThemesHtml = theme.negative_sub_themes.map(s => `<span class="badge negative" style="margin-right:8px; margin-bottom:8px;">${s.name} (${s.approx_count})</span>`).join('');
+            const posSubThemesHtml = theme.positive_sub_themes.map(s => `<span class="badge positive" style="margin-right:8px; margin-bottom:8px;">${s.name} (${s.approx_count})</span>`).join('');
+
+            const negQuotesHtml = theme.representative_quotes.negative.map(q => `<blockquote style="background:var(--neg-light); padding:12px 16px; margin:12px 0; color:var(--text-main); font-style:italic; border-radius:8px; font-size:13px;">"${q}"</blockquote>`).join('');
+            const posQuotesHtml = theme.representative_quotes.positive.map(q => `<blockquote style="background:var(--pos-light); padding:12px 16px; margin:12px 0; color:var(--text-main); font-style:italic; border-radius:8px; font-size:13px;">"${q}"</blockquote>`).join('');
+
+            panel.innerHTML = `
+                <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:20px; border-bottom:1px solid var(--border-color); padding-bottom:16px;">
+                    <h2 style="font-size:1.4rem;">${theme.theme}</h2>
+                    <span class="badge ${badgeClass}"><i class="fa-solid ${icon}"></i> ${badgeText}</span>
+                </div>
+                
+                <div style="display:flex; gap:24px; margin-bottom:24px; font-family:'IBM Plex Mono', monospace; font-size:12px;">
+                    <div><strong style="color:var(--text-muted);">Total Comments:</strong> ${total}</div>
+                    <div style="color:var(--positive);"><strong>Positive:</strong> ${posPct}%</div>
+                    <div style="color:var(--negative);"><strong>Negative:</strong> ${negPct}%</div>
+                    <div style="color:var(--neutral);"><strong>Neutral:</strong> ${neuPct}%</div>
+                </div>
+
+                <div style="margin-bottom:32px; line-height:1.6; color:var(--text-main); font-size:14px; background:var(--accent-light); padding:16px; border-radius:8px; border:1px solid #C7D7FB;">
+                    <strong style="color:var(--primary-accent); font-size:12px; text-transform:uppercase; letter-spacing:1px; display:block; margin-bottom:8px;">💡 AI Summary</strong>
+                    ${theme.narrative}
+                </div>
+
+                <div class="grid-2">
+                    <div style="background:var(--surface2); padding:20px; border-radius:8px;">
+                        <h4 style="margin-bottom:16px; color:var(--negative); font-size:0.8rem; text-transform:uppercase; letter-spacing:1px;">Top Concerns</h4>
+                        <div style="margin-bottom:20px;">${negSubThemesHtml}</div>
+                        <div>${negQuotesHtml}</div>
+                    </div>
+                    <div style="background:var(--surface2); padding:20px; border-radius:8px;">
+                        <h4 style="margin-bottom:16px; color:var(--positive); font-size:0.8rem; text-transform:uppercase; letter-spacing:1px;">Key Strengths</h4>
+                        <div style="margin-bottom:20px;">${posSubThemesHtml}</div>
+                        <div>${posQuotesHtml}</div>
+                    </div>
+                </div>
+            `;
+        }
+
+        // Render Comment Drill-Down
+        function initCommentDrillDown() {
+            const tableBody = document.getElementById('comments-table-body');
+            if (!tableBody) return;
+            
+            const themeFilter = document.getElementById('filter-theme');
+            const monthFilter = document.getElementById('filter-month');
+            const searchInput = document.getElementById('comment-search');
+            const sentimentFilter = document.getElementById('filter-sentiment');
+            
+            if (!dashboardData.theme_narratives) return;
+
+            Object.keys(dashboardData.theme_narratives).forEach(theme => {
+                const opt = document.createElement('option');
+                opt.value = theme;
+                opt.innerText = theme;
+                if (themeFilter) themeFilter.appendChild(opt);
+            });
+
+            const comments = dashboardData.comments || [];
+            const months = [...new Set(comments.map(c => c.month))];
+            months.forEach(m => {
+                const opt = document.createElement('option');
+                opt.value = m;
+                opt.innerText = m;
+                if (monthFilter) monthFilter.appendChild(opt);
+            });
+
+            function renderComments() {
+                const searchTerm = searchInput.value.toLowerCase();
+                const selectedTheme = themeFilter.value;
+                const selectedMonth = monthFilter.value;
+                const selectedSentiment = sentimentFilter.value;
+
+                tableBody.innerHTML = '';
+
+                dashboardData.comments.forEach(c => {
+                    if (selectedTheme !== 'All' && !c.themes.includes(selectedTheme)) return;
+                    if (selectedMonth !== 'All' && c.month !== selectedMonth) return;
+                    if (selectedSentiment !== 'All' && c.sentiment !== selectedSentiment) return;
+                    if (searchTerm && !c.text.toLowerCase().includes(searchTerm) && !c.tags.some(t => t.toLowerCase().includes(searchTerm))) return;
+
+                    let badgeClass = 'neutral';
+                    if (c.sentiment === 'POSITIVE') badgeClass = 'positive';
+                    if (c.sentiment === 'NEGATIVE') badgeClass = 'negative';
+
+                    const themesHtml = c.themes.map(t => `<div style="font-weight:600; margin-bottom:4px; font-size:12px;">${t}</div>`).join('');
+                    const tagsHtml = c.tags.map(t => `<span style="background:var(--surface2); padding:3px 8px; border-radius:4px; font-family:'IBM Plex Mono',monospace; font-size:10px; margin-right:4px;">${t}</span>`).join('');
+
+                    tableBody.innerHTML += `
+                        <tr style="border-bottom:1px solid var(--border-color);">
+                            <td style="padding:16px 12px; vertical-align:top;">
+                                <strong style="font-family:'IBM Plex Mono',monospace; font-size:13px;">${c.response_id}</strong><br>
+                                <span style="color:var(--text-muted); font-size:11px;">${c.month}</span>
+                            </td>
+                            <td style="padding:16px 12px; vertical-align:top;">
+                                <div style="font-size:14px; color:var(--text-main);">${c.text}</div>
+                            </td>
+                            <td style="padding:16px 12px; vertical-align:top;">
+                                ${themesHtml}
+                                <div style="margin-top:8px;">${tagsHtml}</div>
+                            </td>
+                            <td style="padding:16px 12px; vertical-align:top;">
+                                <span class="badge ${badgeClass}">${c.sentiment}</span>
+                            </td>
+                        </tr>
+                    `;
+                });
+            }
+
+            searchInput.addEventListener('input', renderComments);
+            themeFilter.addEventListener('change', renderComments);
+            monthFilter.addEventListener('change', renderComments);
+            sentimentFilter.addEventListener('change', renderComments);
+            renderComments();
+        }
+
+        // Render Month-over-Month Tab
+        function renderMomTab() {
+            const matrixBody = document.getElementById('mom-matrix-body');
+            const signalsContainer = document.getElementById('mom-signals-container');
+
+            // Guard: show placeholder if no MoM data
+            if (!dashboardData.mom_comparisons || Object.keys(dashboardData.mom_comparisons).length === 0) {
+                signalsContainer.innerHTML = `
+                    <div style="grid-column:1/-1; text-align:center; padding:40px; color:var(--text-muted);">
+                        <i class="fa-solid fa-calendar-xmark" style="font-size:2rem; margin-bottom:12px; display:block; opacity:0.4;"></i>
+                        <strong>No Month-over-Month data available.</strong><br>
+                        <span style="font-size:12px;">Run the pipeline with a prior month label to enable MoM comparison.</span>
+                    </div>`;
+                // Still render an empty chart placeholder
+                const ctxMom = document.getElementById('momGroupedChart').getContext('2d');
+                new Chart(ctxMom, {
+                    type: 'bar',
+                    data: { labels: ['No Data'], datasets: [{ label: 'Prior Month % Neg', data: [0] }, { label: 'Current Month % Neg', data: [0] }] },
+                    options: {
+                        responsive: true, maintainAspectRatio: false,
+                        plugins: { legend: { position: 'bottom' } },
+                        scales: { x: { grid: { display: false } }, y: { beginAtZero: true, max: 100, grid: { display: false } } }
+                    }
+                });
+                return;
+            }
+
+            const chartLabels = [];
+            const priorData = [];
+            const currentData = [];
+
+            Object.values(dashboardData.mom_comparisons).forEach(mom => {
+                const shift = mom.sentiment_shift || { prior: { positive: 0, negative: 0, neutral: 0 }, current: { positive: 0, negative: 0, neutral: 0 }, direction: "STABLE", commentary: "No shift data." };
+                
+                const priorTotal = (shift.prior?.positive || 0) + (shift.prior?.negative || 0) + (shift.prior?.neutral || 0);
+                const currTotal = (shift.current?.positive || 0) + (shift.current?.negative || 0) + (shift.current?.neutral || 0);
+
+                const priorPctPos = priorTotal > 0 ? ((shift.prior?.positive || 0) / priorTotal) * 100 : 0;
+                const priorPctNeu = priorTotal > 0 ? ((shift.prior?.neutral || 0) / priorTotal) * 100 : 0;
+                const priorPctNeg = priorTotal > 0 ? ((shift.prior?.negative || 0) / priorTotal) * 100 : 0;
+                const currPctPos = currTotal > 0 ? ((shift.current?.positive || 0) / currTotal) * 100 : 0;
+                const currPctNeu = currTotal > 0 ? ((shift.current?.neutral || 0) / currTotal) * 100 : 0;
+                const currPctNeg = currTotal > 0 ? ((shift.current?.negative || 0) / currTotal) * 100 : 0;
+
+                chartLabels.push(mom.theme);
+                priorData.push(priorPctNeg);
+                currentData.push(currPctNeg);
+
+                const addMatrixRow = (subTheme, status, badgeClass, icon) => {
+                    matrixBody.innerHTML += `
+                        <tr style="border-bottom:1px solid var(--border-color);">
+                            <td style="padding:12px; font-weight:600; font-size:13px;">${mom.theme}</td>
+                            <td style="padding:12px; color:var(--text-muted);">${subTheme}</td>
+                            <td style="padding:12px;"><span class="badge ${badgeClass}"><i class="fa-solid ${icon}"></i> ${status}</span></td>
+                        </tr>
+                    `;
+                };
+
+                (mom.new_negatives || []).forEach(st => addMatrixRow(st, 'New Negative', 'negative', 'fa-circle-exclamation'));
+                (mom.persisting_negatives || []).forEach(st => addMatrixRow(st, 'Persisting Negative', 'warn', 'fa-triangle-exclamation'));
+                (mom.resolved_negatives || []).forEach(st => addMatrixRow(st, 'Resolved', 'positive', 'fa-check'));
+                (mom.new_positives || []).forEach(st => addMatrixRow(st, 'New Positive', 'positive', 'fa-star'));
+                (mom.persisting_positives || []).forEach(st => addMatrixRow(st, 'Persisting Positive', 'positive', 'fa-star'));
+
+                let dirColor = 'var(--neutral)';
+                let shiftText = shift.direction || "UNKNOWN";
+                if (shiftText === 'IMPROVED') { dirColor = 'var(--positive)'; shiftText = '📈 ' + shiftText; }
+                if (shiftText === 'WORSENED') { dirColor = 'var(--negative)'; shiftText = '📉 ' + shiftText; }
+
+                const themeData = dashboardData.theme_narratives[mom.theme];
+                const currentNarrative = themeData ? themeData.narrative : "";
+                const priorNarrative = dashboardData.prior_narratives ? dashboardData.prior_narratives[mom.theme]?.narrative : "";
+
+                signalsContainer.innerHTML += `
+                    <div class="card">
+                        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:16px; border-bottom:1px solid var(--border-color); padding-bottom:12px;">
+                            <h4 style="font-size:1rem;">${mom.theme}</h4>
+                            <span style="font-weight:700; color:${dirColor}; font-size:13px; font-family:'IBM Plex Mono',monospace;">
+                                ${shiftText}
+                            </span>
+                        </div>
+                        
+                        <div style="margin-bottom:16px; font-size:12px; font-family:'IBM Plex Mono',monospace;">
+                            <div style="background:var(--pos-light); padding:8px 14px; border-radius:6px; margin-bottom:6px;">
+                                <strong style="color:var(--positive);">Current:</strong> ${currTotal} | 
+                                <span style="color:var(--positive);">Pos ${currPctPos.toFixed(0)}%</span> | 
+                                <span style="color:var(--neutral);">Neu ${currPctNeu.toFixed(0)}%</span> | 
+                                <span style="color:var(--negative);">Neg ${currPctNeg.toFixed(0)}%</span>
+                            </div>
+                            <div style="background:var(--surface2); padding:8px 14px; border-radius:6px;">
+                                <strong style="color:var(--text-muted);">Prior:</strong> ${priorTotal} | 
+                                <span style="color:var(--positive);">Pos ${priorPctPos.toFixed(0)}%</span> | 
+                                <span style="color:var(--neutral);">Neu ${priorPctNeu.toFixed(0)}%</span> | 
+                                <span style="color:var(--negative);">Neg ${priorPctNeg.toFixed(0)}%</span>
+                            </div>
+                        </div>
+
+                        <div style="font-size:13px; color:var(--text-main); margin-bottom:12px; padding-bottom:12px; border-bottom:1px solid var(--border-color);">
+                            <strong style="color:var(--primary-accent); font-size:11px; text-transform:uppercase; letter-spacing:1px; display:block; margin-bottom:4px;">MoM Shift Commentary</strong>
+                            ${shift.commentary || "No commentary provided."}
+                        </div>
+
+                        <div style="background:var(--warn-light); border:1px solid #FDE68A; padding:12px 16px; border-radius:8px; font-size:13px; line-height:1.5; margin-bottom:12px;">
+                            <strong style="color:var(--warn); font-size:11px; text-transform:uppercase; letter-spacing:1px; display:block; margin-bottom:4px;">Signal</strong>
+                            <span style="color:#92400E;">${mom.key_signals || "No key signals identified."}</span>
+                        </div>
+
+                        <details style="margin-bottom:12px;">
+                            <summary style="cursor:pointer; font-size:13px; color:var(--primary-accent); font-weight:600;">View Month Summaries ▼</summary>
+                            <div style="padding-top:12px;">
+                                <div style="font-size:13px; color:var(--text-muted); margin-bottom:12px; line-height:1.5; background:var(--pos-light); padding:12px; border-radius:8px;">
+                                    <strong style="color:var(--positive); font-size:11px; text-transform:uppercase; letter-spacing:1px; display:block; margin-bottom:4px;">Current Month Summary</strong>
+                                    ${currentNarrative}
+                                </div>
+                                
+                                <div style="font-size:13px; color:var(--text-muted); line-height:1.5; background:var(--surface2); padding:12px; border-radius:8px;">
+                                    <strong style="color:var(--text-muted); font-size:11px; text-transform:uppercase; letter-spacing:1px; display:block; margin-bottom:4px;">Previous Month Summary</strong>
+                                    ${priorNarrative || "No prior summary available."}
+                                </div>
+                            </div>
+                        </details>
+                    </div>
+                `;
+            });
+
+            // Store data for re-rendering
+            window.momChartData = { labels: chartLabels, priorData: priorData, currentData: currentData };
+            renderMomChart();
+        }
+
+        function renderMomChart() {
+            if (!window.momChartData) return;
+            const sentimentType = document.getElementById('mom-sentiment-filter').value;
+            const colors = {
+                positive: { prior: '#E8FDE8', current: '#58CF30', label: '% Positive' },
+                negative: { prior: '#FDE8E8', current: '#EF4444', label: '% Negative' },
+                neutral: { prior: '#E8F0F2', current: '#8AB9BF', label: '% Neutral' }
+            };
+            const c = colors[sentimentType];
+            
+            const ctxMom = document.getElementById('momGroupedChart').getContext('2d');
+            if (window.momChartInstance) window.momChartInstance.destroy();
+            window.momChartInstance = new Chart(ctxMom, {
+                type: 'bar',
+                data: {
+                    labels: window.momChartData.labels,
+                    datasets: [
+                        { label: `Prior Month ${c.label}`, data: window.momChartData.priorData, backgroundColor: c.prior, borderColor: c.current, borderWidth: 1, borderRadius: 4 },
+                        { label: `Current Month ${c.label}`, data: window.momChartData.currentData, backgroundColor: c.current, borderRadius: 4 }
+                    ]
+                },
+                options: {
+                    responsive: true, maintainAspectRatio: false,
+                    plugins: { legend: { position: 'bottom', labels: { font: { family: "'Inter', sans-serif" } } } },
+                    scales: {
+                        x: { grid: { display: false } },
+                        y: { title: { display: true, text: c.label }, beginAtZero: true, max: 100, grid: { display: false } }
+                    }
+                }
+            });
+        }
+
+        // Render Tag Explorer
+        function initTagExplorer() {
+            const tableBody = document.getElementById('tags-table-body');
+            const searchInput = document.getElementById('tag-search');
+
+            function renderTags() {
+                const searchTerm = searchInput.value.toLowerCase();
+                tableBody.innerHTML = '';
+
+                dashboardData.tag_explorer.forEach(t => {
+                    if (searchTerm && !t.tag.toLowerCase().includes(searchTerm) && !t.description.toLowerCase().includes(searchTerm)) return;
+
+                    const themesHtml = t.themes.map(theme => `<span class="badge" style="background:var(--accent-light); color:var(--primary-accent); font-weight:500;">${theme}</span>`).join('');
+
+                    tableBody.innerHTML += `
+                        <tr style="border-bottom:1px solid var(--border-color); transition:background 0.2s;" onmouseover="this.style.background='var(--surface2)'" onmouseout="this.style.background='transparent'">
+                            <td style="padding:16px 12px; font-family:'IBM Plex Mono',monospace; font-weight:600; font-size:13px; color:var(--primary-accent);">${t.tag}</td>
+                            <td style="padding:16px 12px; color:var(--text-muted); font-size:13px;">${t.description}</td>
+                            <td style="padding:16px 12px; font-weight:700;">${t.comment_count}</td>
+                            <td style="padding:16px 12px;">${themesHtml}</td>
+                        </tr>
+                    `;
+                });
+            }
+
+            searchInput.addEventListener('input', renderTags);
+            renderTags();
+        }
+
+        // Initialize
+        console.log("Starting dashboard initialization...");
+        console.log("dashboardData.comments:", dashboardData.comments);
+        console.log("dashboardData.theme_narratives:", dashboardData.theme_narratives);
+        try {
+            renderOverview();
+            console.log("Overview done");
+        } catch(e) { console.error("Overview error:", e); }
+        try {
+            renderThemeDeepDive();
+            console.log("Theme Deep Dive done");
+        } catch(e) { console.error("Theme Deep Dive error:", e); }
+        try {
+            initCommentDrillDown();
+            console.log("Comment Drill-Down done");
+        } catch(e) { console.error("Comment Drill-Down error:", e); }
+        try {
+            renderMomTab();
+            console.log("MoM done");
+        } catch(e) { console.error("MoM error:", e); }
+        try {
+            initTagExplorer();
+            console.log("Tag Explorer done");
+        } catch(e) { console.error("Tag Explorer error:", e); }
+        console.log("Dashboard initialization complete");
+    </script>
+</body>
+
+</html>

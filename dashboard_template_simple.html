@@ -1,0 +1,462 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>NPS Survey Analysis Dashboard</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+
+    <style>
+        :root {
+            --bg-color: #F0F2F6;
+            --card-bg: #FFFFFF;
+            --surface: #FFFFFF;
+            --surface2: rgba(255, 255, 255, 0.5);
+            --border-color: #E2E6EF;
+            --text-main: #1A2035;
+            --text-muted: #6B7A99;
+            --primary-accent: #3B6FF0;
+            --accent-light: #EEF2FE;
+            --positive: #58CF30;
+            --pos-light: #E8FDE8;
+            --negative: #EF4444;
+            --neg-light: #FDE8E8;
+            --neutral: #8AB9BF;
+            --neu-light: #E8F0F2;
+            --warn: #F59E0B;
+            --warn-light: #FFFBEB;
+            --shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+            --shadow-md: 0 4px 16px rgba(0, 0, 0, 0.12);
+            --radius: 10px;
+            --radius-sm: 6px;
+        }
+
+        *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: var(--bg-color);
+            color: var(--text-main);
+            min-height: 100vh;
+            font-size: 14px;
+            line-height: 1.5;
+        }
+
+        h1, h2, h3, h4 { font-weight: 600; }
+
+        .header {
+            background: linear-gradient(135deg, #1A2035 0%, #2C3E6B 100%);
+            padding: 28px 40px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            max-width: 1260px;
+            margin: 24px auto 0;
+            border-radius: 12px;
+            box-shadow: 0 4px 20px rgba(0, 0, 0, 0.15);
+        }
+
+        .header-left h1 {
+            font-size: 1.4rem;
+            font-weight: 700;
+            color: #fff;
+            letter-spacing: -0.3px;
+        }
+
+        .header-meta {
+            font-size: 0.78rem;
+            color: rgba(255, 255, 255, 0.55);
+            margin-top: 3px;
+            font-family: 'IBM Plex Mono', monospace;
+        }
+
+        .main {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 28px 24px;
+        }
+
+        .section-title {
+            font-size: 18px;
+            font-weight: 600;
+            margin-bottom: 20px;
+            color: var(--text-main);
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .section-title i { color: var(--primary-accent); }
+
+        .card {
+            background: #FFFFFF;
+            border-radius: var(--radius);
+            box-shadow: var(--shadow-md);
+            padding: 20px;
+            border: 1px solid #E8E8E8;
+        }
+
+        .grid-4 {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 14px;
+        }
+
+        .grid-2 {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 18px;
+        }
+
+        .mt { margin-top: 18px; }
+
+        .badge {
+            font-family: 'IBM Plex Mono', monospace;
+            padding: 4px 10px;
+            border-radius: var(--radius-sm);
+            font-size: 0.72rem;
+            font-weight: 600;
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+        }
+
+        .badge.positive { background: var(--pos-light); color: var(--positive); border: 1px solid rgba(45, 168, 106, 0.3); }
+        .badge.negative { background: var(--neg-light); color: var(--negative); border: 1px solid rgba(224, 69, 69, 0.3); }
+        .badge.neutral { background: var(--neu-light); color: var(--neutral); border: 1px solid rgba(138, 150, 176, 0.3); }
+        .badge.warn { background: var(--warn-light); color: var(--warn); border: 1px solid rgba(245, 158, 11, 0.3); }
+
+        .stat-card {
+            background: var(--surface);
+            border: 1px solid var(--border-color);
+            border-radius: var(--radius);
+            padding: 18px 20px;
+            box-shadow: var(--shadow);
+        }
+
+        .stat-card .label {
+            color: var(--text-muted);
+            font-size: 0.68rem;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+
+        .stat-card .value { font-size: 2rem; font-weight: 700; line-height: 1.2; }
+        .stat-card .value.pos-col { color: var(--positive); }
+        .stat-card .value.neu-col { color: var(--neutral); }
+        .stat-card .value.neg-col { color: var(--negative); }
+
+        .theme-layout {
+            display: flex;
+            gap: 24px;
+        }
+
+        .theme-selector {
+            width: 300px;
+            flex-shrink: 0;
+        }
+
+        .theme-selector .item {
+            padding: 16px;
+            cursor: pointer;
+            border: 2px solid #E8E8E8;
+            border-radius: 10px;
+            background: #FFFFFF;
+            box-shadow: var(--shadow);
+            transition: all 0.2s ease;
+            margin-bottom: 10px;
+        }
+        .theme-selector .item:hover {
+            border-color: var(--primary-accent);
+            background: var(--accent-light);
+        }
+        .theme-selector .item.active {
+            border-color: var(--primary-accent);
+            background: var(--accent-light);
+            box-shadow: 0 4px 12px rgba(59, 111, 240, 0.25);
+        }
+        .theme-selector .item .name { font-weight: 600; margin-bottom: 6px; }
+        .theme-selector .item .name.active-name { color: var(--primary-accent); }
+        .theme-selector .item .stats { font-size: 11px; font-family: 'IBM Plex Mono', monospace; }
+        .theme-selector .item .vol { font-size: 12px; color: var(--text-muted); font-family: 'IBM Plex Mono', monospace; margin-bottom: 4px; }
+
+        .theme-detail { flex-grow: 1; }
+
+        .subtopic-tag {
+            display: inline-block;
+            background: var(--surface2);
+            padding: 4px 10px;
+            border-radius: 6px;
+            font-size: 12px;
+            font-family: 'IBM Plex Mono', monospace;
+            color: var(--text-muted);
+            margin: 0 6px 6px 0;
+        }
+
+        @media (max-width: 900px) {
+            .theme-layout { flex-direction: column; }
+            .theme-selector { width: 100%; }
+            .grid-4 { grid-template-columns: repeat(2, 1fr); }
+        }
+    </style>
+</head>
+
+<body>
+
+    <!-- HEADER -->
+    <div class="header">
+        <div class="header-left">
+            <h1><i class="fa-solid fa-chart-pie" style="color:var(--primary-accent); margin-right:8px;"></i> NPS Insights</h1>
+            <div class="header-meta">Data from <span id="meta-month"></span> | <span id="meta-total"></span> Total Comments</div>
+        </div>
+    </div>
+
+    <!-- MAIN -->
+    <div class="main">
+
+        <!-- KPI STAT CARDS -->
+        <div class="grid-4" style="margin-bottom: 28px;">
+            <div class="stat-card">
+                <div class="label">Total Comments</div>
+                <div class="value" id="kpi-total">-</div>
+            </div>
+            <div class="stat-card">
+                <div class="label">Positive</div>
+                <div class="value pos-col" id="kpi-pos">-</div>
+            </div>
+            <div class="stat-card">
+                <div class="label">Neutral</div>
+                <div class="value neu-col" id="kpi-neu">-</div>
+            </div>
+            <div class="stat-card">
+                <div class="label">Negative</div>
+                <div class="value neg-col" id="kpi-neg">-</div>
+            </div>
+        </div>
+
+        <!-- THEME DEEP DIVE -->
+        <div style="margin-bottom: 28px;">
+            <div class="section-title"><i class="fa-solid fa-layer-group"></i> Theme Deep Dive</div>
+            <div class="theme-layout">
+                <!-- Theme Selector (Left) -->
+                <div class="card theme-selector">
+                    <div id="theme-selector-list"></div>
+                </div>
+                <!-- Theme Detail (Right) -->
+                <div class="card theme-detail" id="theme-detail-panel">
+                    <div style="text-align:center; padding:40px; color:var(--text-muted);">
+                        <i class="fa-solid fa-spinner fa-spin" style="font-size:2rem; margin-bottom:12px; display:block;"></i>
+                        Loading themes...
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- MONTH OVER MONTH -->
+        <div>
+            <div class="section-title"><i class="fa-solid fa-arrow-trend-up"></i> Month over Month</div>
+
+            <h3 style="margin-bottom: 16px; font-size:0.9rem;">Key Signals & Commentary</h3>
+            <div id="mom-signals-container" class="grid-2">
+                <!-- Signal cards injected here -->
+            </div>
+        </div>
+
+    </div>
+
+    <script>
+        const dashboardData = /*DATA*/;
+
+        // Init metadata
+        document.getElementById('meta-month').innerText = dashboardData.metadata.current_month;
+        document.getElementById('meta-total').innerText = dashboardData.metadata.total_comments;
+
+        // KPI stats
+        function updateKPI() {
+            let totalPos = 0, totalNeg = 0, totalNeu = 0;
+            Object.values(dashboardData.topic_narratives).forEach(t => {
+                totalPos += t.sentiment_split.positive;
+                totalNeg += t.sentiment_split.negative;
+                totalNeu += t.sentiment_split.neutral;
+            });
+            const total = totalPos + totalNeg + totalNeu;
+            document.getElementById('kpi-total').innerText = total;
+            document.getElementById('kpi-pos').innerText = totalPos;
+            document.getElementById('kpi-neg').innerText = totalNeg;
+            document.getElementById('kpi-neu').innerText = totalNeu;
+        }
+        updateKPI();
+
+        // ===== THEME DEEP DIVE =====
+        function renderThemeDeepDive() {
+            const selectorList = document.getElementById('theme-selector-list');
+            const detailPanel = document.getElementById('theme-detail-panel');
+
+            const topics = Object.values(dashboardData.topic_narratives);
+
+            topics.forEach((topic, index) => {
+                const total = topic.total_comments;
+                const pctPos = total > 0 ? ((topic.sentiment_split.positive / total) * 100).toFixed(0) : 0;
+                const pctNeu = total > 0 ? ((topic.sentiment_split.neutral / total) * 100).toFixed(0) : 0;
+                const pctNeg = total > 0 ? ((topic.sentiment_split.negative / total) * 100).toFixed(0) : 0;
+
+                const item = document.createElement('div');
+                item.className = 'item' + (index === 0 ? ' active' : '');
+                item.innerHTML = `
+                    <div class="name${index === 0 ? ' active-name' : ''}">${topic.topic}</div>
+                    <div class="vol">Vol: ${total}</div>
+                    <div class="stats">
+                        <span style="color:var(--positive);">Pos ${pctPos}%</span> |
+                        <span style="color:var(--neutral);">Neu ${pctNeu}%</span> |
+                        <span style="color:var(--negative);">Neg ${pctNeg}%</span>
+                    </div>
+                `;
+
+                item.onclick = () => {
+                    document.querySelectorAll('.theme-selector .item').forEach(el => {
+                        el.classList.remove('active');
+                        el.querySelector('.name').classList.remove('active-name');
+                    });
+                    item.classList.add('active');
+                    item.querySelector('.name').classList.add('active-name');
+                    renderThemeDetail(topic);
+                };
+
+                selectorList.appendChild(item);
+                if (index === 0) renderThemeDetail(topic);
+            });
+        }
+
+        function renderThemeDetail(topic) {
+            const panel = document.getElementById('theme-detail-panel');
+            const total = topic.total_comments;
+            const posPct = ((topic.sentiment_split.positive / total) * 100).toFixed(1);
+            const negPct = ((topic.sentiment_split.negative / total) * 100).toFixed(1);
+            const neuPct = ((topic.sentiment_split.neutral / total) * 100).toFixed(1);
+
+            let badgeClass = 'neutral';
+            let badgeText = 'Healthy';
+            let icon = 'fa-check-circle';
+            if (negPct > 50) { badgeClass = 'negative'; badgeText = 'High Concern'; icon = 'fa-circle-exclamation'; }
+            else if (negPct > 30) { badgeClass = 'warn'; badgeText = 'Moderate Concern'; icon = 'fa-triangle-exclamation'; }
+            else if (posPct > 50) { badgeClass = 'positive'; badgeText = 'Excellent'; icon = 'fa-star'; }
+
+            const subtopicsHtml = topic.subtopics.map(s => `<span class="subtopic-tag">${s}</span>`).join('');
+
+            const negQuotesHtml = (topic.representative_quotes.negative || []).map(q =>
+                `<blockquote style="background:var(--neg-light); padding:12px 16px; margin:8px 0; color:var(--text-main); font-style:italic; border-radius:8px; font-size:13px;">"${q}"</blockquote>`
+            ).join('');
+
+            const posQuotesHtml = (topic.representative_quotes.positive || []).map(q =>
+                `<blockquote style="background:var(--pos-light); padding:12px 16px; margin:8px 0; color:var(--text-main); font-style:italic; border-radius:8px; font-size:13px;">"${q}"</blockquote>`
+            ).join('');
+
+            panel.innerHTML = `
+                <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:20px; border-bottom:1px solid var(--border-color); padding-bottom:16px;">
+                    <h2 style="font-size:1.4rem;">${topic.topic}</h2>
+                    <span class="badge ${badgeClass}"><i class="fa-solid ${icon}"></i> ${badgeText}</span>
+                </div>
+
+                <div style="display:flex; gap:24px; margin-bottom:24px; font-family:'IBM Plex Mono',monospace; font-size:12px;">
+                    <div><strong style="color:var(--text-muted);">Total Comments:</strong> ${total}</div>
+                    <div style="color:var(--positive);"><strong>Positive:</strong> ${posPct}%</div>
+                    <div style="color:var(--negative);"><strong>Negative:</strong> ${negPct}%</div>
+                    <div style="color:var(--neutral);"><strong>Neutral:</strong> ${neuPct}%</div>
+                </div>
+
+                <div style="margin-bottom:24px;">
+                    <strong style="color:var(--text-muted); font-size:11px; text-transform:uppercase; letter-spacing:1px; display:block; margin-bottom:8px;">Subtopics</strong>
+                    <div>${subtopicsHtml}</div>
+                </div>
+
+                <div style="margin-bottom:32px; line-height:1.6; color:var(--text-main); font-size:14px; background:var(--accent-light); padding:16px; border-radius:8px; border:1px solid #C7D7FB;">
+                    <strong style="color:var(--primary-accent); font-size:12px; text-transform:uppercase; letter-spacing:1px; display:block; margin-bottom:8px;">AI Summary</strong>
+                    ${topic.narrative}
+                </div>
+
+                <div class="grid-2">
+                    <div style="background:var(--surface2); padding:20px; border-radius:8px;">
+                        <h4 style="margin-bottom:12px; color:var(--negative); font-size:0.8rem; text-transform:uppercase; letter-spacing:1px;">Member Concerns</h4>
+                        ${negQuotesHtml || '<div style="color:var(--text-muted); font-style:italic;">No negative feedback recorded.</div>'}
+                    </div>
+                    <div style="background:var(--surface2); padding:20px; border-radius:8px;">
+                        <h4 style="margin-bottom:12px; color:var(--positive); font-size:0.8rem; text-transform:uppercase; letter-spacing:1px;">Member Praise</h4>
+                        ${posQuotesHtml || '<div style="color:var(--text-muted); font-style:italic;">No positive feedback recorded.</div>'}
+                    </div>
+                </div>
+            `;
+        }
+
+        // ===== MONTH OVER MONTH =====
+        function renderMomSection() {
+            const signalsContainer = document.getElementById('mom-signals-container');
+
+            if (!dashboardData.mom_comparisons || Object.keys(dashboardData.mom_comparisons).length === 0) {
+                signalsContainer.innerHTML = '<div style="grid-column:1/-1; text-align:center; padding:40px; color:var(--text-muted);">No MoM data available.</div>';
+                return;
+            }
+
+            Object.values(dashboardData.mom_comparisons).forEach(mom => {
+                const shift = mom.sentiment_shift;
+                const priorTotal = (shift.prior?.positive || 0) + (shift.prior?.negative || 0) + (shift.prior?.neutral || 0);
+                const currTotal = (shift.current?.positive || 0) + (shift.current?.negative || 0) + (shift.current?.neutral || 0);
+
+                let dirColor = 'var(--neutral)';
+                let shiftText = shift.direction || "UNKNOWN";
+                if (shiftText === 'IMPROVED') { dirColor = 'var(--positive)'; shiftText = '\uD83D\uDCC8 ' + shiftText; }
+                if (shiftText === 'WORSENED') { dirColor = 'var(--negative)'; shiftText = '\uD83D\uDCC9 ' + shiftText; }
+
+                const currentNarrative = dashboardData.topic_narratives[mom.topic]?.narrative || "";
+                const priorNarrative = mom.prior_narrative || "";
+
+                signalsContainer.innerHTML += `
+                    <div class="card">
+                        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px; border-bottom:1px solid var(--border-color); padding-bottom:12px;">
+                            <h4 style="font-size:1rem;">${mom.topic}</h4>
+                            <span style="font-weight:700; color:${dirColor}; font-size:13px; font-family:'IBM Plex Mono',monospace;">${shiftText}</span>
+                        </div>
+                        <div style="margin-bottom:12px; font-size:12px; font-family:'IBM Plex Mono',monospace;">
+                            <div style="background:var(--pos-light); padding:8px 14px; border-radius:6px; margin-bottom:6px;">
+                                <strong style="color:var(--positive);">Current:</strong> ${currTotal} comments
+                            </div>
+                            <div style="background:var(--surface2); padding:8px 14px; border-radius:6px;">
+                                <strong style="color:var(--text-muted);">Prior:</strong> ${priorTotal} comments
+                            </div>
+                        </div>
+                        <div style="margin-bottom:12px; padding-bottom:12px; border-bottom:1px solid var(--border-color);">
+                            <div style="font-size:13px; color:var(--text-main); margin-bottom:10px;">
+                                <strong style="color:var(--primary-accent); font-size:11px; text-transform:uppercase; letter-spacing:1px; display:block; margin-bottom:4px;">MoM Shift Commentary</strong>
+                                ${shift.commentary || "No commentary provided."}
+                            </div>
+                            <details style="font-size:13px; margin-bottom:8px;">
+                                <summary style="cursor:pointer; color:var(--primary-accent); font-weight:600; padding:4px 0;">Current Month Summary</summary>
+                                <div style="padding:12px; margin-top:8px; background:var(--pos-light); border-radius:8px; line-height:1.5; color:var(--text-main);">
+                                    ${currentNarrative || "No current month summary available."}
+                                </div>
+                            </details>
+                            <details style="font-size:13px;">
+                                <summary style="cursor:pointer; color:var(--text-muted); font-weight:600; padding:4px 0;">Previous Month Summary</summary>
+                                <div style="padding:12px; margin-top:8px; background:var(--surface2); border-radius:8px; line-height:1.5; color:var(--text-main);">
+                                    ${priorNarrative || "No previous month summary available."}
+                                </div>
+                            </details>
+                        </div>
+                        <div style="background:var(--warn-light); border:1px solid #FDE68A; padding:12px 16px; border-radius:8px; font-size:13px; line-height:1.5;">
+                            <strong style="color:var(--warn); font-size:11px; text-transform:uppercase; letter-spacing:1px; display:block; margin-bottom:4px;">Signal</strong>
+                            <span style="color:#92400E;">${mom.key_signals || "No key signals identified."}</span>
+                        </div>
+                    </div>
+                `;
+            });
+        }
+
+        // Initialize
+        try { renderThemeDeepDive(); } catch(e) { console.error('Theme Deep Dive error:', e); }
+        try { renderMomSection(); } catch(e) { console.error('MoM error:', e); }
+    </script>
+</body>
+
+</html>

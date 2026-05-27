@@ -1,292 +1,330 @@
-import pandas as pd
-import json
+"""
+NPS Dashboard Generator
+Takes a DataFrame with Survey Month, Comments, Topics, Subtopics columns,
+calls Gemini API to generate summaries, and outputs an HTML dashboard.
+"""
+
 import os
 import re
+import json
+import time
+import pandas as pd
 from google import genai
 from collections import defaultdict
 
-# Setup Google GenAI Client (you should set your API key in environment or replace 'YOUR_API_KEY_HERE')
-API_KEY = os.environ.get("GEMINI_API_KEY", "YOUR_API_KEY_HERE")
-MODEL = "gemini-2.5-flash"  # Using Gemini model
+# ============================================================
+# CONFIGURATION - Set these values
+# ============================================================
+API_KEY = "YOUR_API_KEY_HERE"
+MODEL = "gemma-4-26b-a4b-it"
+DATA_FILE = "data.xlsx"  # Path to your input file
+SHEET_NAME = "Sheet1"    # If using Excel
 
-def call_llm(system_prompt, user_prompt, client):
-    """Make LLM call and return response"""
-    if API_KEY == "YOUR_API_KEY_HERE":
-        # Return mock response if no API key is provided for testing
-        return "Mock LLM Response generated because no valid API key was found."
+# Column names in your DataFrame
+MONTH_COL = "Survey Month"
+COMMENT_COL = "Comments"
+TOPIC_COL = "Topics"
+SUBTOPIC_COL = "Subtopics"
+
+# Output
+OUTPUT_HTML = "dashboard_output.html"
+TEMPLATE_HTML = os.path.join(os.path.dirname(__file__), "dashboard_template_simple.html")
+
+# ============================================================
+# SETUP
+# ============================================================
+client = genai.Client(api_key=API_KEY)
+
+def call_llm(system_prompt, user_prompt, label="call"):
+    response = client.models.generate_content(
+        model=MODEL,
+        contents=user_prompt,
+        config={"system_instruction": system_prompt, "temperature": 0.0}
+    )
+    return response.text.strip()
+
+def parse_json(text, label="response"):
+    cleaned = text.strip()
+    cleaned = re.sub(r"```json\s*", "", cleaned)
+    cleaned = re.sub(r"```\s*", "", cleaned).strip()
     try:
-        response = client.models.generate_content(
-            model=MODEL,
-            contents=user_prompt,
-            config={"system_instruction": system_prompt, "temperature": 0.0}
-        )
-        return response.text.strip()
-    except Exception as e:
-        print(f"LLM Error: {e}")
-        return "LLM generation failed."
+        return json.loads(cleaned)
+    except json.JSONDecodeError as e:
+        print(f"  Warning: Failed to parse {label}: {e}")
+        return None
 
-def generate_theme_narrative(theme, comments_list, client):
-    sys_prompt = "Write an executive summary (3-5 sentences) for the theme based on the comments provided."
-    user_prompt = f"Theme: {theme}\nComments:\n" + "\n".join([f"- {c['Sentiment']}: {c['comment']}" for c in comments_list[:15]])
-    return call_llm(sys_prompt, user_prompt, client)
+# ============================================================
+# CELL 1: LOAD DATA
+# ============================================================
+print("=" * 60)
+print("CELL 1: LOAD DATA")
+print("=" * 60)
 
-def generate_mom_commentary(theme, prior_pct, curr_pct, comments_list, client):
-    sys_prompt = "Write a short 2-3 sentence commentary explaining the month over month shift in sentiment."
-    user_prompt = f"Theme: {theme}\nPrior month negative sentiment: {prior_pct:.1f}%\nCurrent month negative sentiment: {curr_pct:.1f}%\nComments: " + "\n".join([c['comment'] for c in comments_list[:10]])
-    return call_llm(sys_prompt, user_prompt, client)
+if DATA_FILE.endswith(".xlsx") or DATA_FILE.endswith(".xls"):
+    df = pd.read_excel(DATA_FILE, sheet_name=SHEET_NAME)
+else:
+    df = pd.read_csv(DATA_FILE)
 
-def generate_mom_signals(theme, comments_list, client):
-    sys_prompt = "Identify 1 key actionable signal (1 sentence) from these comments."
-    user_prompt = f"Theme: {theme}\nComments: " + "\n".join([c['comment'] for c in comments_list[:10]])
-    return call_llm(sys_prompt, user_prompt, client)
+print(f"Loaded {len(df)} rows from {DATA_FILE}")
+print(f"Columns: {list(df.columns)}")
 
-def generate_dashboard(df, template_path, output_path):
-    if API_KEY != "YOUR_API_KEY_HERE":
-        client = genai.Client(api_key=API_KEY)
-    else:
-        client = None
-    
-    # Identify Prior and Current Month (assuming sorted or we just pick top 2)
-    months = sorted(df['Month'].unique())
-    if len(months) >= 2:
-        prior_month, current_month = months[-2], months[-1]
-    elif len(months) == 1:
-        prior_month, current_month = months[0], months[0]
-    else:
-        prior_month, current_month = "N/A", "N/A"
+# Validate columns
+for col in [MONTH_COL, COMMENT_COL, TOPIC_COL, SUBTOPIC_COL]:
+    if col not in df.columns:
+        raise ValueError(f"Column '{col}' not found in data. Available: {list(df.columns)}")
 
-    df_current = df[df['Month'] == current_month]
-    df_prior = df[df['Month'] == prior_month]
+# Detect current and prior months
+months = sorted(df[MONTH_COL].unique())
+CURRENT_MONTH = months[-1]
+PRIOR_MONTH = months[-2] if len(months) > 1 else None
+print(f"Current month: {CURRENT_MONTH}")
+print(f"Prior month: {PRIOR_MONTH}")
 
-    dashboard_data = {
-        "metadata": {
-            "current_month": current_month,
-            "prior_month": prior_month,
-            "total_comments": len(df_current)
-        },
-        "theme_narratives": {},
-        "comments": [],
-        "mom_comparisons": {},
-        "tag_explorer": []
-    }
+# Build structured data
+comments = []
+for _, row in df.iterrows():
+    comments.append({
+        "id": str(row.name),
+        "month": str(row[MONTH_COL]),
+        "text": str(row[COMMENT_COL]),
+        "topic": str(row[TOPIC_COL]),
+        "subtopic": str(row[SUBTOPIC_COL])
+    })
 
-    # Populate theme narratives
-    for theme in df_current['Themes'].dropna().unique():
-        theme_df = df_current[df_current['Themes'] == theme]
-        total = len(theme_df)
-        pos = len(theme_df[theme_df['Sentiment'] == 'POSITIVE'])
-        neg = len(theme_df[theme_df['Sentiment'] == 'NEGATIVE'])
-        neu = len(theme_df[theme_df['Sentiment'] == 'NEUTRAL'])
-        
-        subtopics = theme_df['subtopics'].dropna().unique().tolist()
-        
-        comments_list = theme_df.to_dict('records')
-        
-        narrative = generate_theme_narrative(theme, comments_list, client)
-        
-        # We store subtopics directly instead of negative/positive_sub_themes
-        dashboard_data["theme_narratives"][theme] = {
-            "theme": theme,
-            "total_comments": total,
-            "sentiment_split": { "positive": pos, "negative": neg, "neutral": neu },
-            "subtopics": [{"name": s, "approx_count": len(theme_df[theme_df['subtopics'] == s])} for s in subtopics],
-            "raw_comments": {
-                "positive": theme_df[theme_df['Sentiment'] == 'POSITIVE']['comment'].tolist()[:5],
-                "negative": theme_df[theme_df['Sentiment'] == 'NEGATIVE']['comment'].tolist()[:5],
-                "neutral": theme_df[theme_df['Sentiment'] == 'NEUTRAL']['comment'].tolist()[:5],
-            },
-            "narrative": narrative
-        }
+# Group by topic
+topic_groups = defaultdict(list)
+for c in comments:
+    topic_groups[c["topic"]].append(c)
 
-    # Populate MoM Comparisons
-    for theme in df['Themes'].dropna().unique():
-        curr_theme_df = df_current[df_current['Themes'] == theme]
-        prior_theme_df = df_prior[df_prior['Themes'] == theme]
-        
-        curr_total = len(curr_theme_df)
-        prior_total = len(prior_theme_df)
-        
-        if curr_total == 0 and prior_total == 0:
-            continue
-            
-        curr_pos = len(curr_theme_df[curr_theme_df['Sentiment'] == 'POSITIVE'])
-        curr_neg = len(curr_theme_df[curr_theme_df['Sentiment'] == 'NEGATIVE'])
-        curr_neu = len(curr_theme_df[curr_theme_df['Sentiment'] == 'NEUTRAL'])
-        
-        prior_pos = len(prior_theme_df[prior_theme_df['Sentiment'] == 'POSITIVE'])
-        prior_neg = len(prior_theme_df[prior_theme_df['Sentiment'] == 'NEGATIVE'])
-        prior_neu = len(prior_theme_df[prior_theme_df['Sentiment'] == 'NEUTRAL'])
-        
-        curr_neg_pct = (curr_neg/curr_total*100) if curr_total else 0
-        prior_neg_pct = (prior_neg/prior_total*100) if prior_total else 0
-        
-        if curr_neg_pct > prior_neg_pct + 5:
-            direction = "WORSENED"
-        elif curr_neg_pct < prior_neg_pct - 5:
-            direction = "IMPROVED"
-        else:
-            direction = "STABLE"
+print(f"Topics found: {list(topic_groups.keys())}")
 
-        comments_list = curr_theme_df.to_dict('records')
-        commentary = generate_mom_commentary(theme, prior_neg_pct, curr_neg_pct, comments_list, client)
-        signals = generate_mom_signals(theme, comments_list, client)
+# ============================================================
+# CELL 2: GENERATE TOPIC NARRATIVES
+# ============================================================
+print("\n" + "=" * 60)
+print("CELL 2: GENERATE TOPIC NARRATIVES")
+print("=" * 60)
 
-        dashboard_data["mom_comparisons"][theme] = {
-            "theme": theme,
-            "sentiment_shift": {
-                "prior": { "positive": prior_pos, "negative": prior_neg, "neutral": prior_neu },
-                "current": { "positive": curr_pos, "negative": curr_neg, "neutral": curr_neu },
-                "direction": direction,
-                "commentary": commentary
-            },
-            "key_signals": signals
-        }
+SYS_TOPIC = """You are a health insurance member experience analyst.
+Analyze NPS feedback comments for a given topic and produce structured output.
+Be specific, evidence-driven, and concise."""
 
-    # Populate raw comments for drill-down
-    for i, row in df.iterrows():
-        dashboard_data["comments"].append({
-            "response_id": f"id_{i}",
-            "month": row['Month'],
-            "text": row['comment'],
-            "themes": [row['Themes']] if pd.notna(row['Themes']) else [],
-            "tags": [row['subtopics']] if pd.notna(row['subtopics']) else [],
-            "sentiment": row['Sentiment'],
-            "essence": "",
-            "sentiment_evidence": ""
-        })
+topic_narratives = {}
 
-    # Generate the HTML
-    with open(template_path, 'r', encoding='utf-8') as f:
-        html = f.read()
+for topic, topic_comments in topic_groups.items():
+    print(f"\nProcessing topic: {topic} ({len(topic_comments)} comments)")
 
-    # 1. Replace Dashboard Data
-    # regex to replace the const dashboardData = { ... }; block
-    html = re.sub(
-        r'const dashboardData = \{[\s\S]*?\};\n', 
-        f'const dashboardData = {json.dumps(dashboard_data, indent=4)};\n', 
-        html
+    # Get unique subtopics for this topic
+    subtopics = sorted(set(c["subtopic"] for c in topic_comments if c["subtopic"]))
+
+    # Build comment block with IDs
+    comment_block = "\n".join(
+        f"[{c['id']}] (Month: {c['month']}, Subtopic: {c['subtopic']}) {c['text']}"
+        for c in topic_comments
     )
 
-    # 2. Update Theme Deep Dive JS
-    theme_detail_js = """
-        function renderThemeDetail(theme) {
-            const panel = document.getElementById('theme-detail-panel');
-            const total = theme.total_comments;
-            const posPct = ((theme.sentiment_split.positive / total) * 100).toFixed(1);
-            const negPct = ((theme.sentiment_split.negative / total) * 100).toFixed(1);
-            const neuPct = ((theme.sentiment_split.neutral / total) * 100).toFixed(1);
+    prompt = f"""Topic: {topic}
+Subtopics identified: {subtopics if subtopics else "None specified"}
 
-            let badgeClass = 'neutral';
-            let badgeText = 'Healthy';
-            let icon = 'fa-check-circle';
-            if (negPct > 50) { badgeClass = 'negative'; badgeText = 'High Concern'; icon = 'fa-circle-exclamation'; }
-            else if (negPct > 30) { badgeClass = 'warn'; badgeText = 'Moderate Concern'; icon = 'fa-triangle-exclamation'; }
-            else if (posPct > 50) { badgeClass = 'positive'; badgeText = 'Excellent'; icon = 'fa-star'; }
+Comments:
+{comment_block}
 
-            const subtopicsHtml = (theme.subtopics || []).map(s => `<span class="badge neutral" style="margin-right:8px; margin-bottom:8px;">${s.name} (${s.approx_count})</span>`).join('');
-            
-            let commentsHtml = "";
-            ['negative', 'positive', 'neutral'].forEach(sent => {
-                if(theme.raw_comments && theme.raw_comments[sent]) {
-                    const bgClass = sent === 'negative' ? 'var(--neg-light)' : (sent === 'positive' ? 'var(--pos-light)' : 'var(--neu-light)');
-                    theme.raw_comments[sent].forEach(q => {
-                        commentsHtml += `<blockquote style="background:${bgClass}; padding:12px 16px; margin:12px 0; color:var(--text-main); font-style:italic; border-radius:8px; font-size:13px;">"${q}"</blockquote>`;
-                    });
-                }
-            });
+Return JSON with this exact structure:
+{{
+  "sentiment_split": {{"positive": count, "negative": count, "neutral": count}},
+  "narrative": "4-6 sentence executive summary of member feedback for this topic. Include specific patterns, key drivers, and actionable insights.",
+  "representative_quotes": {{
+    "negative": ["quote 1", "quote 2"],
+    "positive": ["quote 1", "quote 2"]
+  }}
+}}
 
-            panel.innerHTML = `
-                <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:20px; border-bottom:1px solid var(--border-color); padding-bottom:16px;">
-                    <h2 style="font-size:1.4rem;">${theme.theme}</h2>
-                    <span class="badge ${badgeClass}"><i class="fa-solid ${icon}"></i> ${badgeText}</span>
-                </div>
-                
-                <div style="display:flex; gap:24px; margin-bottom:24px; font-family:'IBM Plex Mono', monospace; font-size:12px;">
-                    <div><strong style="color:var(--text-muted);">Total Comments:</strong> ${total}</div>
-                    <div style="color:var(--positive);"><strong>Positive:</strong> ${posPct}%</div>
-                    <div style="color:var(--negative);"><strong>Negative:</strong> ${negPct}%</div>
-                    <div style="color:var(--neutral);"><strong>Neutral:</strong> ${neuPct}%</div>
-                </div>
+Rules:
+- Classify each comment's sentiment accurately
+- Pick quotes that best represent the sentiment direction
+- Narrative must be specific to the data, not generic
+- Total of positive+negative+neutral must equal {len(topic_comments)}"""
 
-                <div style="margin-bottom:32px; line-height:1.6; color:var(--text-main); font-size:14px; background:var(--accent-light); padding:16px; border-radius:8px; border:1px solid #C7D7FB;">
-                    <strong style="color:var(--primary-accent); font-size:12px; text-transform:uppercase; letter-spacing:1px; display:block; margin-bottom:8px;">💡 AI Summary</strong>
-                    ${theme.narrative}
-                </div>
+    raw = call_llm(SYS_TOPIC, prompt, f"Topic: {topic}")
+    result = parse_json(raw, f"Topic: {topic}")
 
-                <div class="grid-2">
-                    <div style="background:var(--surface2); padding:20px; border-radius:8px;">
-                        <h4 style="margin-bottom:16px; color:var(--text-main); font-size:0.8rem; text-transform:uppercase; letter-spacing:1px;">Subtopics</h4>
-                        <div style="margin-bottom:20px;">${subtopicsHtml}</div>
-                    </div>
-                    <div style="background:var(--surface2); padding:20px; border-radius:8px; max-height:400px; overflow-y:auto;">
-                        <h4 style="margin-bottom:16px; color:var(--text-main); font-size:0.8rem; text-transform:uppercase; letter-spacing:1px;">Comments</h4>
-                        <div>${commentsHtml}</div>
-                    </div>
-                </div>
-            `;
+    if result and result.get("sentiment_split"):
+        topic_narratives[topic] = {
+            "topic": topic,
+            "total_comments": len(topic_comments),
+            "sentiment_split": result["sentiment_split"],
+            "subtopics": subtopics,
+            "narrative": result.get("narrative", ""),
+            "representative_quotes": result.get("representative_quotes", {"negative": [], "positive": []})
         }
-"""
-    # Replace the old renderThemeDetail with the new one
-    html = re.sub(r'function renderThemeDetail\(theme\) \{[\s\S]*?(?=\n        // Render Comment Drill-Down)', theme_detail_js, html)
+        s = result["sentiment_split"]
+        print(f"  Pos:{s.get('positive',0)} Neu:{s.get('neutral',0)} Neg:{s.get('negative',0)}")
+    else:
+        topic_narratives[topic] = {
+            "topic": topic, "total_comments": len(topic_comments),
+            "sentiment_split": {"positive": 0, "negative": 0, "neutral": len(topic_comments)},
+            "subtopics": subtopics, "narrative": "", "representative_quotes": {"negative": [], "positive": []}
+        }
+        print(f"  Failed to parse, using defaults")
 
-    # 3. Update Month over Month HTML structure
-    mom_html_replacement = """
-        <!-- TAB CONTENT: MOM -->
-        <div id="mom" class="tab-content">
-            <div style="display:flex; gap:16px; margin-bottom:20px; align-items:center;">
-                <label style="font-size:14px; font-weight:600; color:var(--text-main);">Sentiment View:</label>
-                <select id="mom-sentiment-filter" onchange="renderMomChart()" style="padding:8px 14px; border:1px solid var(--border); border-radius:8px; font-family:'Inter',sans-serif; outline:none;">
-                    <option value="negative">% Negative</option>
-                    <option value="positive">% Positive</option>
-                    <option value="neutral">% Neutral</option>
-                </select>
-            </div>
-            
-            <h3 style="margin-bottom: 16px; font-size:0.9rem;">Key Signals & Commentary</h3>
-            <div id="mom-signals-container" class="grid-2" style="margin-bottom: 24px;">
-                <!-- Signal cards injected here -->
-            </div>
+    time.sleep(2)
 
-            <div class="card" style="margin-bottom: 24px;">
-                <h3 style="margin-bottom: 20px; font-size:0.85rem; text-transform:uppercase; color:var(--text-muted); letter-spacing:1px;">
-                    Prior vs Current Month Comparison</h3>
-                <div style="height: 350px;">
-                    <canvas id="momGroupedChart"></canvas>
-                </div>
-            </div>
-        </div>
-"""
-    # Replace MoM HTML
-    html = re.sub(r'<!-- TAB CONTENT: MOM -->[\s\S]*?(?=<!-- TAB CONTENT: TAGS -->)', mom_html_replacement, html)
+print(f"\nGenerated {len(topic_narratives)} topic narratives")
 
-    # 4. Remove matrix rendering from renderMomTab in JS
-    html = re.sub(r'const matrixBody = document.getElementById\(\'mom-matrix-body\'\);\n', '', html)
-    html = re.sub(r'const addMatrixRow[\s\S]*?\};\n\n', '', html)
-    html = re.sub(r'\(mom\.new_negatives \|\| \[\]\)\.forEach\(st => addMatrixRow[\s\S]*?fa-star\'\)\);\n', '', html)
+# ============================================================
+# CELL 3: GENERATE MOM COMPARISONS
+# ============================================================
+print("\n" + "=" * 60)
+print("CELL 3: GENERATE MONTH-OVER-MONTH COMPARISONS")
+print("=" * 60)
 
-    with open(output_path, 'w', encoding='utf-8') as f:
-        f.write(html)
-        
-    print(f"Successfully generated dashboard to {output_path}")
+SYS_MOM = """You are a health insurance member experience analyst.
+Compare sentiment between two months and identify signals and shifts.
+Be concise, data-driven, and specific."""
 
-if __name__ == "__main__":
-    # Create Mock Dataframe to test
-    data = {
-        'Month': ['2026-03', '2026-03', '2026-04', '2026-04', '2026-04'],
-        'comment': [
-            'Wait times are too long', 
-            'Good service overall',
-            'I waited 45 minutes on hold',
-            'Jane was very helpful',
-            'Portal is slow'
-        ],
-        'Sentiment': ['NEGATIVE', 'POSITIVE', 'NEGATIVE', 'POSITIVE', 'NEGATIVE'],
-        'Themes': ['Customer Service', 'Customer Service', 'Customer Service', 'Customer Service', 'Digital Experience'],
-        'subtopics': ['hold times', 'agent helpfulness', 'hold times', 'agent helpfulness', 'portal speed']
-    }
-    df = pd.DataFrame(data)
-    
-    template_path = r'c:\Users\harip\Documents\Python\Topic\Manual\dashboard_template_v3.html'
-    output_path = r'c:\Users\harip\Documents\Python\Topic\Manual\generated_dashboard.html'
-    
-    generate_dashboard(df, template_path, output_path)
+mom_comparisons = {}
+
+if PRIOR_MONTH:
+    for topic in topic_narratives.keys():
+        # Split comments by month
+        current_tc = [c for c in topic_groups[topic] if c["month"] == CURRENT_MONTH]
+        prior_tc = [c for c in topic_groups[topic] if c["month"] == PRIOR_MONTH]
+
+        if not current_tc or not prior_tc:
+            print(f"  Skipping {topic} (no data in both months)")
+            continue
+
+        print(f"\nComparing {topic}: Current={len(current_tc)}, Prior={len(prior_tc)}")
+
+        # Build prompt with samples from both months
+        curr_block = "\n".join(f"[{c['id']}] {c['text']}" for c in current_tc[:10])
+        prior_block = "\n".join(f"[{c['id']}] {c['text']}" for c in prior_tc[:10])
+
+        prompt = f"""Topic: {topic}
+
+Current Month ({CURRENT_MONTH}) - {len(current_tc)} comments:
+{curr_block}
+
+Prior Month ({PRIOR_MONTH}) - {len(prior_tc)} comments:
+{prior_block}
+
+Return JSON with this exact structure:
+{{
+  "sentiment_prior": {{"positive": count, "negative": count, "neutral": count}},
+  "sentiment_current": {{"positive": count, "negative": count, "neutral": count}},
+  "direction": "IMPROVED or WORSENED or STABLE",
+  "commentary": "2-3 sentence explanation of the sentiment shift and what drove it",
+  "key_signals": "1-2 sentence key takeaway for leadership"
+}}
+
+Rules:
+- IMPROVED if negative sentiment decreased or positive increased significantly
+- WORSENED if negative sentiment increased or positive decreased significantly
+- STABLE if no meaningful change
+- Commentary must reference specific patterns from the data
+- sentiment_prior total must equal {len(prior_tc)}
+- sentiment_current total must equal {len(current_tc)}"""
+
+        raw = call_llm(SYS_MOM, prompt, f"MoM: {topic}")
+        result = parse_json(raw, f"MoM: {topic}")
+
+        # Get prior narrative
+        prior_prompt = f"""Topic: {topic}
+Summarize this prior month feedback in 3-4 sentences:
+
+Comments ({PRIOR_MONTH}):
+{prior_block}
+
+Return JSON: {{"narrative": "3-4 sentence summary"}}"""
+
+        prior_raw = call_llm(SYS_TOPIC, prior_prompt, f"Prior: {topic}")
+        prior_result = parse_json(prior_raw, f"Prior: {topic}")
+
+        mom_comparisons[topic] = {
+            "topic": topic,
+            "prior_narrative": prior_result.get("narrative", "") if prior_result else "",
+            "sentiment_shift": {
+                "prior": result.get("sentiment_prior", {"positive": 0, "negative": 0, "neutral": len(prior_tc)}) if result else {"positive": 0, "negative": 0, "neutral": len(prior_tc)},
+                "current": result.get("sentiment_current", {"positive": 0, "negative": 0, "neutral": len(current_tc)}) if result else {"positive": 0, "negative": 0, "neutral": len(current_tc)},
+                "direction": result.get("direction", "STABLE") if result else "STABLE",
+                "commentary": result.get("commentary", "") if result else ""
+            },
+            "key_signals": result.get("key_signals", "") if result else ""
+        }
+        print(f"  Direction: {mom_comparisons[topic]['sentiment_shift']['direction']}")
+
+        time.sleep(2)
+
+else:
+    print("Only one month found. MoM comparison requires at least 2 months of data.")
+    mom_comparisons = {}
+
+# ============================================================
+# CELL 4: BUILD DATA PAYLOAD
+# ============================================================
+print("\n" + "=" * 60)
+print("CELL 4: BUILD DATA PAYLOAD")
+print("=" * 60)
+
+total_all = sum(t["total_comments"] for t in topic_narratives.values())
+
+# Get sentiment counts from the LLM-generated splits
+total_pos = sum(t["sentiment_split"].get("positive", 0) for t in topic_narratives.values())
+total_neg = sum(t["sentiment_split"].get("negative", 0) for t in topic_narratives.values())
+total_neu = sum(t["sentiment_split"].get("neutral", 0) for t in topic_narratives.values())
+
+dashboard_data = {
+    "metadata": {
+        "current_month": CURRENT_MONTH,
+        "prior_month": PRIOR_MONTH or CURRENT_MONTH,
+        "total_comments": total_all
+    },
+    "topic_narratives": topic_narratives,
+    "mom_comparisons": mom_comparisons
+}
+
+print(f"Total comments: {total_all}")
+print(f"Topics: {len(topic_narratives)}")
+print(f"MoM comparisons: {len(mom_comparisons)}")
+
+# ============================================================
+# CELL 5: GENERATE HTML OUTPUT
+# ============================================================
+print("\n" + "=" * 60)
+print("CELL 5: GENERATE HTML OUTPUT")
+print("=" * 60)
+
+# Load template
+with open(TEMPLATE_HTML, "r", encoding="utf-8") as f:
+    template = f.read()
+
+# Inject data
+data_json = json.dumps(dashboard_data, indent=2, ensure_ascii=False)
+html = template.replace("/*DATA*/", data_json)
+
+# Save
+with open(OUTPUT_HTML, "w", encoding="utf-8") as f:
+    f.write(html)
+
+print(f"Dashboard saved to: {os.path.abspath(OUTPUT_HTML)}")
+
+# ============================================================
+# CELL 6: SUMMARY
+# ============================================================
+print("\n" + "=" * 60)
+print("CELL 6: SUMMARY")
+print("=" * 60)
+
+print(f"Source data: {DATA_FILE}")
+print(f"Column mapping:")
+print(f"  {MONTH_COL} -> Survey Month")
+print(f"  {COMMENT_COL} -> Comments")
+print(f"  {TOPIC_COL} -> Topics")
+print(f"  {SUBTOPIC_COL} -> Subtopics")
+print(f"Period: {PRIOR_MONTH or 'N/A'} -> {CURRENT_MONTH}")
+print(f"Total comments: {total_all}")
+print(f"Sentiment: +{total_pos} / ~{total_neu} / -{total_neg}")
+print(f"Topics analyzed: {len(topic_narratives)}")
+print(f"MoM comparisons: {len(mom_comparisons)}")
+print(f"Output: {OUTPUT_HTML}")
+print("DONE!")

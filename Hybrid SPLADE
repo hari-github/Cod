@@ -1,0 +1,226 @@
+%pip install torch transformers qdrant-client langchain-core langchain-google-vertexai pydantic
+dbutils.library.restartPython()
+
+
+from typing import List
+from pydantic import BaseModel, Field
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_google_vertexai import ChatVertexAI
+
+# 1. Define the structural output schema required by the downstream parser
+class StructuredFeedbackSchema(BaseModel):
+    intents: List[str] = Field(
+        description="Array of applicable canonical intents. Must choose from: 'Billing Dispute', 'Coverage Inquiry', 'Customer Service Issue', 'Technical Error'."
+    )
+    tags: List[str] = Field(
+        description="Array of 2 to 3 word highly descriptive phrases capturing explicit concepts, entities, or complaints (e.g., 'mri denial', 'long hold time'). Max 4 tags."
+    )
+
+# 2. Standalone function to handle the frontier model interaction
+def extract_metadata(system_prompt: str, user_comment: str) -> StructuredFeedbackSchema:
+    """
+    Invokes the Gemini model to parse a text comment into the structured 
+    array format specified by the StructuredFeedbackSchema.
+    """
+    # Initialize the Vertex AI Gemini model
+    llm = ChatVertexAI(model_name="gemini-1.5-pro", temperature=0.0)
+    structured_llm = llm.with_structured_output(StructuredFeedbackSchema)
+    
+    # Structure the prompt messages
+    prompt_template = ChatPromptTemplate.from_messages([
+        ("system", system_prompt),
+        ("human", "{comment}")
+    ])
+    
+    # Chain components and execute
+    extraction_chain = prompt_template | structured_llm
+    return extraction_chain.invoke({"comment": user_comment})
+
+
+import torch
+from transformers import AutoModelForMaskedLM, AutoTokenizer
+from qdrant_client import QdrantClient
+from qdrant_client import models
+
+# Define configuration parameters
+COLLECTION_NAME = "structured_health_feedback"
+
+# 1. Initialize the Qdrant Client in-memory for testing
+print("Initializing Qdrant storage engine...")
+client = QdrantClient(":memory:")
+
+# 2. Download and initialize the local transformer layers for sparse encoding
+print("Loading local SPLADE model layers (this may take a moment)...")
+tokenizer = AutoTokenizer.from_pretrained("naver/splade-v3-distilbert")
+model = AutoModelForMaskedLM.from_pretrained("naver/splade-v3-distilbert")
+model.eval() # Set model to evaluation mode for inference
+
+# 3. Provision the sparse database collection
+if not client.collection_exists(COLLECTION_NAME):
+    client.create_collection(
+        collection_name=COLLECTION_NAME,
+        vectors_config={}, # Pass empty dict to explicitly bypass dense indexing
+        sparse_vectors_config={
+            "splade_vector": models.SparseVectorParams() # Configure the explicit sparse layer
+        }
+    )
+    print(f"Collection '{COLLECTION_NAME}' successfully created.")
+else:
+    print(f"Collection '{COLLECTION_NAME}' already exists.")
+
+
+
+----------------------------------------------------------------------------
+
+def compute_splade_vector(text: str) -> dict:
+    """
+    Tokenizes text, evaluates token routing log-weight via SPLADE layers,
+    and returns a clean dictionary containing the active sparse indices and values.
+    """
+    inputs = tokenizer(text, return_tensors="pt", padding=True, truncation=True, max_length=512)
+    
+    with torch.no_grad():
+        output = model(**inputs)
+        
+    logits = output.logits
+    relu_log = torch.log(1 + torch.relu(logits))
+    sparse_vec, _ = torch.max(relu_log, dim=1)
+    sparse_vec = sparse_vec.squeeze()
+    
+    # Isolate tokens that received operational weights
+    non_zero_indices = sparse_vec.nonzero().squeeze()
+    if non_zero_indices.dim() == 0: 
+        non_zero_indices = non_zero_indices.unsqueeze(0)
+        
+    return {
+        "indices": non_zero_indices.tolist(),
+        "values": sparse_vec[non_zero_indices].tolist()
+    }
+
+def index_document(doc_id: int, text: str, intents: list, tags: list):
+    """
+    Computes the sparse vector for a document and pushes it into the 
+    database collection along with the structured array metadata payload.
+    """
+    # Run sparse embedding generation
+    sparse_data = compute_splade_vector(text)
+    
+    # Construct the metadata payload dictionary
+    payload = {
+        "original_text": text,
+        "intents": intents,
+        "tags": tags
+    }
+    
+    # Upsert the structural point directly into Qdrant
+    client.upsert(
+        collection_name=COLLECTION_NAME,
+        points=[
+            models.PointStruct(
+                id=doc_id,
+                vector={
+                    "splade_vector": models.SparseVector(
+                        indices=sparse_data["indices"],
+                        values=sparse_data["values"]
+                    )
+                },
+                payload=payload
+            )
+        ]
+    )
+
+def search_with_intent_filter(query: str, target_intent: str = None, top_k: int = 3) -> list:
+    """
+    Runs a query vector against the index, applying a strict pre-filter 
+    condition against the intents array metadata when provided.
+    """
+    # Embed the search query
+    query_data = compute_splade_vector(query)
+    
+    # Construct the array-matching condition if a filter is set
+    search_filter = None
+    if target_intent:
+        search_filter = models.Filter(
+            must=[
+                models.FieldCondition(
+                    key="intents",
+                    match=models.MatchValue(value=target_intent)
+                )
+            ]
+        )
+        
+    # Execute retrieval
+    results = client.search(
+        collection_name=COLLECTION_NAME,
+        query_vector=models.NamedSparseVector(
+            name="splade_vector",
+            vector=models.SparseVector(
+                indices=query_data["indices"],
+                values=query_data["values"]
+            )
+        ),
+        query_filter=search_filter,
+        limit=top_k
+    )
+    
+    # Format and return hits
+    return [
+        {
+            "score": hit.score,
+            "text": hit.payload["original_text"],
+            "intents": hit.payload["intents"],
+            "tags": hit.payload["tags"]
+        } for hit in results
+    ]
+
+-------------------------------------------------------------------------
+
+# 1. System Prompt Definition
+SYSTEM_PROMPT = """You are an expert healthcare operations analyst. 
+Extract applicable overarching intents and specific descriptive 2-3 word phrase tags from the user feedback. 
+Ensure intents map strictly to canonical categories. Be precise with tags, keeping them short."""
+
+# 2. Raw unstructured input feedback dataset
+raw_feedbacks = [
+    "I was on hold for two full hours, and when the agent finally picked up, they told me my prior authorization for the knee MRI was rejected.",
+    "The portal gave me a network error when I tried uploading my claim documentation. Now I am missing the filing deadline!",
+    "The medical treatment was fine, but the billing department sent me a huge invoice because they typed the coding wrong."
+]
+
+print("--- Step 1: Processing Extracted Metadata & Indexing ---")
+for index, comment in enumerate(raw_feedbacks, start=1):
+    # Call the extraction function directly
+    extracted_metadata = extract_metadata(system_prompt=SYSTEM_PROMPT, user_comment=comment)
+    
+    print(f"\nDocument ID {index} Processing:")
+    print(f" -> Generated Intents: {extracted_metadata.intents}")
+    print(f" -> Generated Tags   : {extracted_metadata.tags}")
+    
+    # Push into the database using top-level functions and arrays
+    index_document(
+        doc_id=index, 
+        text=comment, 
+        intents=extracted_metadata.intents, 
+        tags=extracted_metadata.tags
+    )
+
+print("\n--- Step 2: Running Metadata-Routed Sparse Query ---")
+
+# Define target search string and metadata pre-filter
+query_string = "prior auth rejection or service delays"
+target_filter = "Coverage Inquiry"
+
+# Execute the search function
+search_results = search_with_intent_filter(
+    query=query_string, 
+    target_intent=target_filter, 
+    top_k=2
+)
+
+# Render output results
+print(f"\nSearch matches for query '{query_string}' isolated by intent '{target_filter}':")
+for rank, match in enumerate(search_results, start=1):
+    print(f"\n[Rank {rank}] Similarity Score: {match['score']:.4f}")
+    print(f"Text: {match['text']}")
+    print(f"Associated Intents: {match['intents']}")
+    print(f"Associated Tags   : {match['tags']}")

@@ -84,6 +84,81 @@ db_client = OpenAI(
     base_url=DATABRICKS_BASE_URL
 )
 
+# ── Token Usage Tracker ───────────────────────────────────────────────────────
+
+class TokenTracker:
+    """
+    Accumulates token usage across all LLM and embedding API calls.
+    Tracks input/output separately per call type so you can see
+    exactly where tokens are being spent.
+
+    Call types tracked:
+      fingerprint_ingest  : batch fingerprint extraction at ingest
+      hyde_expansion      : HyDE comment generation at query time
+      llm_classification  : binary classification of ambiguous tier
+      embedding_ingest    : embed() calls during document indexing
+      embedding_query     : embed() calls during search
+    """
+
+    def __init__(self):
+        self.reset()
+
+    def reset(self):
+        self._data = {}
+
+    def record(self, call_type: str, input_tokens: int, output_tokens: int = 0):
+        if call_type not in self._data:
+            self._data[call_type] = {
+                "calls":         0,
+                "input_tokens":  0,
+                "output_tokens": 0
+            }
+        self._data[call_type]["calls"]         += 1
+        self._data[call_type]["input_tokens"]  += input_tokens
+        self._data[call_type]["output_tokens"] += output_tokens
+
+    def summary(self, label: str = "Token Usage Summary"):
+        total_in  = sum(v["input_tokens"]  for v in self._data.values())
+        total_out = sum(v["output_tokens"] for v in self._data.values())
+        total     = total_in + total_out
+
+        print(f"\n  {'─'*58}")
+        print(f"  {label}")
+        print(f"  {'─'*58}")
+        print(f"  {'Call Type':<28} {'Calls':>5} {'Input':>8} {'Output':>8} {'Total':>8}")
+        print(f"  {'─'*58}")
+        for call_type, v in sorted(self._data.items()):
+            row_total = v["input_tokens"] + v["output_tokens"]
+            print(
+                f"  {call_type:<28} "
+                f"{v['calls']:>5} "
+                f"{v['input_tokens']:>8,} "
+                f"{v['output_tokens']:>8,} "
+                f"{row_total:>8,}"
+            )
+        print(f"  {'─'*58}")
+        print(
+            f"  {'TOTAL':<28} "
+            f"{'':>5} "
+            f"{total_in:>8,} "
+            f"{total_out:>8,} "
+            f"{total:>8,}"
+        )
+        print(f"  {'─'*58}\n")
+
+    def reset_query(self):
+        """
+        Resets query-time counters only (hyde + classification + query embeds)
+        so you can track per-query cost separately from ingest cost.
+        """
+        query_types = ["hyde_expansion", "llm_classification", "embedding_query"]
+        for t in query_types:
+            if t in self._data:
+                del self._data[t]
+
+
+token_tracker = TokenTracker()
+
 
 # ── Pydantic Schemas ──────────────────────────────────────────────────────────
 
@@ -111,7 +186,7 @@ class TagSchema(BaseModel):
 
 # ── LLM Helpers ───────────────────────────────────────────────────────────────
 
-def llm_call(system_prompt: str, user_content: str) -> str:
+def llm_call_old(system_prompt: str, user_content: str) -> str:
     response = db_client.chat.completions.create(
         model=LLM_MODEL,
         temperature=0.0,
@@ -119,6 +194,24 @@ def llm_call(system_prompt: str, user_content: str) -> str:
             {"role": "system", "content": system_prompt},
             {"role": "user",   "content": user_content}
         ]
+    )
+    return response.choices[0].message.content
+
+
+def llm_call(system_prompt: str, user_content: str, call_type: str = "llm_misc") -> str:
+    response = db_client.chat.completions.create(
+        model=LLM_MODEL,
+        temperature=0.0,
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user",   "content": user_content}
+        ]
+    )
+    # Record usage
+    token_tracker.record(
+        call_type     = call_type,
+        input_tokens  = response.usage.prompt_tokens,
+        output_tokens = response.usage.completion_tokens
     )
     return response.choices[0].message.content
 
@@ -227,7 +320,7 @@ def extract_fingerprints_batch(
     Falls back to empty topic block on parse failure so pipeline continues.
     """
     numbered = "\n".join(f"{i+1}. {c}" for i, c in enumerate(comments))
-    raw      = llm_call(BATCH_FINGERPRINT_SYSTEM_PROMPT, numbered)
+    raw      = llm_call(BATCH_FINGERPRINT_SYSTEM_PROMPT, numbered, call_type="fingerprint_ingest")
 
     try:
         parsed = parse_json_response(raw)
@@ -287,7 +380,7 @@ Return ONLY valid JSON. No preamble, no markdown fences.
 
 def generate_hyde_comments(keyword: str) -> List[str]:
     print(f"\n  [HyDE] Generating hypothetical comments for '{keyword}' ...")
-    raw     = llm_call(HYDE_SYSTEM_PROMPT, f"Keyword: {keyword}")
+    raw     = llm_call(HYDE_SYSTEM_PROMPT, f"Keyword: {keyword}", call_type="hyde_expansion")
     parsed  = parse_json_response(raw)
     comments = parsed.get("comments", [keyword])
     for i, c in enumerate(comments, 1):
@@ -297,7 +390,7 @@ def generate_hyde_comments(keyword: str) -> List[str]:
 
 # ── Embedding ─────────────────────────────────────────────────────────────────
 
-def embed_text(text: str) -> List[float]:
+def embed_text_old(text: str) -> List[float]:
     response = db_client.embeddings.create(
         model=EMBED_MODEL,
         input=text
@@ -305,6 +398,19 @@ def embed_text(text: str) -> List[float]:
     vec = response.data[0].embedding
     return vec if isinstance(vec, list) else list(vec)
 
+def embed_text(text: str, call_type: str = "embedding_misc") -> List[float]:
+    response = db_client.embeddings.create(
+        model=EMBED_MODEL,
+        input=text
+    )
+    token_tracker.record(
+        call_type    = call_type,
+        input_tokens = response.usage.prompt_tokens
+        # embeddings have no output tokens
+    )
+    vec = response.data[0].embedding
+    return vec if isinstance(vec, list) else list(vec)
+  
 
 # ── Qdrant Init ───────────────────────────────────────────────────────────────
 
@@ -378,7 +484,7 @@ def index_document(
                 if not phrase.strip():
                     continue
                 _point_id_counter += 1
-                vector = embed_text(phrase)
+                vector = embed_text(phrase, call_type="embedding_ingest")
                 points.append(
                     models.PointStruct(
                         id=_point_id_counter,
@@ -423,7 +529,7 @@ def retrieve_candidates(keyword: str) -> List[Dict]:
     seen: Dict[int, Dict] = {}
 
     for i, comment in enumerate(hyde_comments):
-        vector   = embed_text(comment)
+        vector   = embed_text(comment, call_type="embedding_query")
         response = qdrant.query_points(
             collection_name=COLLECTION_NAME,
             query=vector,
@@ -531,7 +637,7 @@ def classify_batch(batch: List[Dict], keyword: str) -> List[Dict]:
         for c in batch
     )
     user_msg = f'Query: "{keyword}"\n\nComments:\n{formatted}'
-    raw      = llm_call(CLASSIFY_SYSTEM_PROMPT, user_msg)
+    raw      = llm_call(CLASSIFY_SYSTEM_PROMPT, user_msg, call_type="llm_classification")
 
     try:
         parsed    = parse_json_response(raw)
@@ -777,3 +883,14 @@ if __name__ == "__main__":
         # Uncomment to inspect score distributions and tune thresholds:
         # all_candidates = retrieve_candidates(keyword)
         # print_score_distribution(all_candidates, keyword)
+
+
+# After all documents indexed
+print("\n=== Ingest Complete ===")
+token_tracker.summary("Ingest Token Usage")
+
+# After each search — reset query counters first for per-query view
+token_tracker.reset_query()
+results = search(keyword)
+render_results(results)
+token_tracker.summary(f"Query Token Usage — '{keyword}'")

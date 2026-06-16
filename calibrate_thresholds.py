@@ -23,8 +23,10 @@
 # test queries to match topics that actually appear in your comments.
 
 CACHE_DIR      = "./embed_cache"   # folder holding *.npy + *.meta.json
-GEMINI_API_KEY = ""                # leave "" to read from .env
+GEMINI_API_KEY = ""                # leave "" to read from .env (used if you pick
+                                   # the Gemini / OllamaGemini provider in CELL 2)
 TOP_N          = 15                # how many top docs to print per query
+# Provider is chosen interactively in CELL 2 — same 1/2/3/4 menu as search_v2.py.
 
 # Representative queries spanning your data's topics. More queries = a more
 # stable suggestion. Use real phrasings members/analysts would search.
@@ -67,14 +69,16 @@ try:
 except Exception:
     pass
 
+import os
+
 from search_v2 import (
     SEMANTIC_MIN_COSINE, SEMANTIC_AUTO_QUALIFY, FUZZY_BYPASS_MIN_COSINE,
-    embedding_mean, center_normalize, center_normalize_query,
+    embedding_mean, center_normalize, center_normalize_query, select_provider,
 )
-from provider_ollama_gemini import OllamaGeminiProvider
 
 
-def _read_api_key() -> str:
+def _resolve_api_key() -> str:
+    """Best-effort Gemini key from CELL 1 or .env — returns '' if unset."""
     if GEMINI_API_KEY:
         return GEMINI_API_KEY
     env = Path(".env")
@@ -82,7 +86,7 @@ def _read_api_key() -> str:
         for line in env.read_text(encoding="utf-8").splitlines():
             if line.strip().startswith("GEMINI_API_KEY="):
                 return line.strip().split("=", 1)[1]
-    raise SystemExit("No API key — set GEMINI_API_KEY in CELL 1 or in .env")
+    return ""
 
 
 def _find_cache(cache_dir: str) -> Path:
@@ -104,11 +108,29 @@ raw_matrix = np.load(str(npy_path)).astype(np.float32)
 query_mean = embedding_mean(raw_matrix)
 doc_matrix = center_normalize(raw_matrix, query_mean)   # centered + normalized
 
-provider = OllamaGeminiProvider(_read_api_key())
+# Expose the key so select_provider() won't re-prompt for Gemini / OllamaGemini.
+_key = _resolve_api_key()
+if _key:
+    os.environ.setdefault("GEMINI_API_KEY", _key)
 
-print(f"Loaded cache : {npy_path.name}")
+# Same 1/2/3/4 menu as search_v2.py (Databricks / Gemini / Local / OllamaGemini).
+provider = select_provider()
+
+# CRITICAL: query vectors must come from the SAME embedding model that built the
+# cache, or they live in a different space and every cosine is meaningless.
+cache_model = meta.get("embed_model", "")
+if cache_model and provider.embed_model != cache_model:
+    raise SystemExit(
+        f"\n  Embed model mismatch — calibration would be invalid.\n"
+        f"    cache was built with : {cache_model}\n"
+        f"    selected provider use: {provider.embed_model}\n"
+        f"  Choose the provider whose embed model matches the cache, or rebuild it."
+    )
+
+print(f"\nLoaded cache : {npy_path.name}")
 print(f"  Docs       : {len(documents)}   (meta says {meta.get('doc_count', '?')})")
 print(f"  Embed model: {meta.get('embed_model', '?')}   dim={raw_matrix.shape[1]}")
+print(f"  Provider   : {provider.name}  (embed {provider.embed_model})")
 print(f"  Current thresholds -> min={SEMANTIC_MIN_COSINE}  auto={SEMANTIC_AUTO_QUALIFY}  fuzzy_bypass={FUZZY_BYPASS_MIN_COSINE}")
 
 # %% ── CELL 3: Anisotropy check — is centering still needed/working? ───────────

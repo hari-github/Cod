@@ -25,7 +25,7 @@ import re
 import sys
 import time
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Union
 
 import numpy as np
 import pandas as pd
@@ -62,13 +62,14 @@ DEFAULT_TEST_QUERIES = [
 import google.generativeai as genai
 
 
-class Provider:
+class GeminiProvider:
+    """Google AI: gemini-embedding-2 + gemma (default)."""
     name = "GeminiGemma"
-    embed_model = EMBED_MODEL
-    llm_model = LLM_MODEL
 
-    def __init__(self, api_key: str):
+    def __init__(self, api_key: str, embed_model: str = EMBED_MODEL, llm_model: str = LLM_MODEL):
         genai.configure(api_key=api_key)
+        self.embed_model = embed_model
+        self.llm_model = llm_model
 
     def embed_texts(self, texts: List[str], task_type: str = "retrieval_document") -> List[List[float]]:
         res = genai.embed_content(model=self.embed_model, content=texts, task_type=task_type)
@@ -95,11 +96,41 @@ class Provider:
         raise last
 
 
-def get_provider(api_key: Optional[str] = None) -> Provider:
-    key = api_key or os.environ.get("GEMINI_API_KEY") or _key_from_dotenv()
-    if not key:
-        raise SystemExit("No API key — pass --api-key, set GEMINI_API_KEY, or add it to .env")
-    return Provider(key)
+class DatabricksProvider:
+    """OpenAI-compatible Databricks Model Serving endpoint (embeddings + chat)."""
+    name = "Databricks"
+
+    def __init__(self, base_url: str, token: str, llm_model: str, embed_model: str):
+        from openai import OpenAI                       # imported lazily so Gemini users need no openai
+        self._client = OpenAI(api_key=token, base_url=base_url)
+        self.llm_model = llm_model
+        self.embed_model = embed_model
+
+    def embed_texts(self, texts: List[str], task_type: str = "retrieval_document") -> List[List[float]]:
+        resp = self._client.embeddings.create(model=self.embed_model, input=list(texts))
+        return [list(d.embedding) for d in resp.data]   # OpenAI API preserves input order
+
+    def embed_text(self, text: str, task_type: str = "retrieval_document") -> List[float]:
+        return self.embed_texts([text], task_type)[0]
+
+    def llm_call(self, system: str, user: str) -> str:
+        last = RuntimeError("no attempt")
+        for attempt in range(3):
+            try:
+                resp = self._client.chat.completions.create(
+                    model=self.llm_model, temperature=0.0,
+                    messages=[{"role": "system", "content": system},
+                              {"role": "user", "content": user}])
+                return resp.choices[0].message.content
+            except Exception as exc:
+                last = exc
+                if attempt < 2:
+                    print(f"  [WARN] LLM failed ({type(exc).__name__}); retry in 2s")
+                    time.sleep(2)
+        raise last
+
+
+Provider = Union[GeminiProvider, DatabricksProvider]
 
 
 def _key_from_dotenv() -> str:
@@ -109,6 +140,25 @@ def _key_from_dotenv() -> str:
             if line.strip().startswith("GEMINI_API_KEY="):
                 return line.strip().split("=", 1)[1]
     return ""
+
+
+def get_provider(args) -> Provider:
+    """Build the provider chosen by --provider (gemini | databricks)."""
+    if getattr(args, "provider", "gemini") == "databricks":
+        base  = args.db_base_url   or os.environ.get("DATABRICKS_BASE_URL")
+        token = args.db_token      or os.environ.get("DATABRICKS_TOKEN")
+        llm   = args.db_llm_model  or os.environ.get("DATABRICKS_LLM_MODEL")
+        emb   = args.db_embed_model or os.environ.get("DATABRICKS_EMBED_MODEL")
+        missing = [n for n, v in [("--db-base-url", base), ("--db-token", token),
+                                  ("--db-llm-model", llm), ("--db-embed-model", emb)] if not v]
+        if missing:
+            raise SystemExit("Databricks needs: " + ", ".join(missing) +
+                             "  (pass as args or set DATABRICKS_BASE_URL/TOKEN/LLM_MODEL/EMBED_MODEL).")
+        return DatabricksProvider(base, token, llm, emb)
+    key = args.api_key or os.environ.get("GEMINI_API_KEY") or _key_from_dotenv()
+    if not key:
+        raise SystemExit("Gemini needs --api-key, GEMINI_API_KEY, or .env")
+    return GeminiProvider(key)
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -352,15 +402,15 @@ def rerank(candidates: List[Dict], query: str, provider: Provider) -> List[Dict]
 # ═════════════════════════════════════════════════════════════════════════════
 # CACHE I/O
 # ═════════════════════════════════════════════════════════════════════════════
-def _npy_path() -> Path:
-    tag = EMBED_MODEL.replace("/", "_").replace(".", "_").replace("-", "_").replace(":", "_")
+def _npy_path(embed_model: str) -> Path:
+    tag = embed_model.replace("/", "_").replace(".", "_").replace("-", "_").replace(":", "_")
     return Path(CACHE_DIR) / f"summaries_{tag}.npy"
 
 
-def load_cache() -> Tuple[np.ndarray, np.ndarray, List[Dict], List[Dict]]:
-    npy = _npy_path()
+def load_cache(embed_model: str) -> Tuple[np.ndarray, np.ndarray, List[Dict], List[Dict]]:
+    npy = _npy_path(embed_model)
     if not npy.exists():
-        raise SystemExit(f"No cache at {npy} — run `ingest` first.")
+        raise SystemExit(f"No cache at {npy} — run `ingest` with this provider first.")
     raw = np.load(str(npy)).astype(np.float32)
     mean = embedding_mean(raw)
     matrix = center_normalize(raw, mean)
@@ -373,7 +423,7 @@ def load_cache() -> Tuple[np.ndarray, np.ndarray, List[Dict], List[Dict]]:
 # COMMANDS
 # ═════════════════════════════════════════════════════════════════════════════
 def cmd_ingest(args):
-    provider = get_provider(args.api_key)
+    provider = get_provider(args)
     df = pd.read_csv(args.csv).dropna(subset=[args.text_col]).reset_index(drop=True)
     if args.sample:
         df = df.head(args.sample)
@@ -411,18 +461,22 @@ def cmd_ingest(args):
     matrix = np.array(vecs, dtype=np.float32)
 
     cache = Path(CACHE_DIR); cache.mkdir(parents=True, exist_ok=True)
-    np.save(str(_npy_path()), matrix)
+    npy = _npy_path(provider.embed_model)
+    np.save(str(npy), matrix)
     json.dump(summaries, open(cache / "documents.json", "w", encoding="utf-8"), indent=2, ensure_ascii=False)
     json.dump(comments, open(cache / "comments.json", "w", encoding="utf-8"), indent=2, ensure_ascii=False)
     json.dump({"doc_count": len(summaries), "comments": len(comments),
-               "embed_model": EMBED_MODEL, "kind": "topic-summaries"},
-              open(_npy_path().with_suffix(".meta.json"), "w", encoding="utf-8"), indent=2)
-    print(f"Saved cache -> {_npy_path().name} ({matrix.shape})")
+               "provider": provider.name, "embed_model": provider.embed_model, "kind": "topic-summaries"},
+              open(npy.with_suffix(".meta.json"), "w", encoding="utf-8"), indent=2)
+    print(f"Saved cache -> {npy.name} ({matrix.shape})")
 
 
 def cmd_calibrate(args):
-    provider = get_provider(args.api_key)
-    raw = np.load(str(_npy_path())).astype(np.float32)
+    provider = get_provider(args)
+    npy = _npy_path(provider.embed_model)
+    if not npy.exists():
+        raise SystemExit(f"No cache at {npy} — run `ingest` with this provider first.")
+    raw = np.load(str(npy)).astype(np.float32)
     docs = json.load(open(Path(CACHE_DIR) / "documents.json", encoding="utf-8"))
     mean = embedding_mean(raw)
     mn = center_normalize(raw, mean)
@@ -510,10 +564,10 @@ def run_query(provider, sum_matrix, mean, summaries, comments_by_id, query, verb
 
 
 def cmd_search(args):
-    provider = get_provider(args.api_key)
-    matrix, mean, summaries, comments = load_cache()
+    provider = get_provider(args)
+    matrix, mean, summaries, comments = load_cache(provider.embed_model)
     comments_by_id = {c["comment_id"]: c["text"] for c in comments}
-    print(f"Loaded {len(summaries)} summaries from {len(comments)} comments.")
+    print(f"Loaded {len(summaries)} summaries from {len(comments)} comments ({provider.name}).")
 
     def do(q):
         results, n_sum = run_query(provider, matrix, mean, summaries, comments_by_id, q)
@@ -540,7 +594,13 @@ def cmd_search(args):
 
 def main():
     ap = argparse.ArgumentParser(description="Topic-summary search (self-contained)")
-    ap.add_argument("--api-key", default=None)
+    # global provider options (place BEFORE the subcommand on the command line)
+    ap.add_argument("--provider", choices=["gemini", "databricks"], default="gemini")
+    ap.add_argument("--api-key", default=None, help="Gemini API key (or GEMINI_API_KEY / .env)")
+    ap.add_argument("--db-base-url", default=None, help="Databricks base URL (or DATABRICKS_BASE_URL)")
+    ap.add_argument("--db-token", default=None, help="Databricks token (or DATABRICKS_TOKEN)")
+    ap.add_argument("--db-llm-model", default=None, help="Databricks LLM endpoint (or DATABRICKS_LLM_MODEL)")
+    ap.add_argument("--db-embed-model", default=None, help="Databricks embed endpoint (or DATABRICKS_EMBED_MODEL)")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     p = sub.add_parser("ingest"); p.set_defaults(func=cmd_ingest)
